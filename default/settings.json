@@ -68,7 +68,6 @@
         "tokenizer": 99,
         "token_padding": 64,
         "collapse_newlines": false,
-        "pygmalion_formatting": 0,
         "pin_examples": false,
         "strip_examples": false,
         "trim_sentences": false,
@@ -151,6 +150,7 @@
             "names_force_groups": true,
             "activation_regex": ""
         },
+        "default_context": "Default",
         "context": {
             "preset": "Default",
             "story_string": "{{#if system}}{{system}}\n{{/if}}{{#if wiBefore}}{{wiBefore}}\n{{/if}}{{#if description}}{{description}}\n{{/if}}{{#if personality}}{{char}}'s personality: {{personality}}\n{{/if}}{{#if scenario}}Scenario: {{scenario}}\n{{/if}}{{#if wiAfter}}{{wiAfter}}\n{{/if}}{{#if persona}}{{persona}}\n{{/if}}",
@@ -165,9 +165,10 @@
         "persona_show_notifications": true,
         "custom_stopping_strings": "",
         "custom_stopping_strings_macro": true,
-        "fuzzy_search": false,
+        "fuzzy_search": true,
         "encode_tags": false,
-        "lazy_load": 0
+        "lazy_load": 100,
+        "ui_mode": 1
     },
     "extension_settings": {
         "apiUrl": "http://localhost:5100",
@@ -602,7 +603,6 @@
         "proxy_password": "",
         "assistant_prefill": "",
         "use_ai21_tokenizer": false,
-        "exclude_assistant": false,
-        "nsfw_avoidance_prompt": "Avoid writing a NSFW/Smut reply. Creatively write around it NSFW/Smut scenarios in character."
+        "exclude_assistant": false
     }
 }

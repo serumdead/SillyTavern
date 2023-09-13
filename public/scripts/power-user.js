@@ -13,7 +13,8 @@ import {
     getCurrentChatId,
     printCharacters,
     setCharacterId,
-    setEditedMessageId
+    setEditedMessageId,
+    renderTemplate,
 } from "../script.js";
 import { isMobile, initMovingUI } from "./RossAscends-mods.js";
 import {
@@ -29,7 +30,7 @@ import {
 import { registerSlashCommand } from "./slash-commands.js";
 import { tokenizers } from "./tokenizers.js";
 
-import { delay, resetScrollHeight } from "./utils.js";
+import { countOccurrences, delay, isOdd, resetScrollHeight, sortMoments, timestampToMoment } from "./utils.js";
 
 export {
     loadPowerUserSettings,
@@ -39,7 +40,6 @@ export {
     sortEntitiesList,
     fixMarkdown,
     power_user,
-    pygmalion_options,
     send_on_enter_options,
 };
 
@@ -49,6 +49,11 @@ const MAX_CONTEXT_UNLOCKED = 65536;
 const defaultStoryString = "{{#if system}}{{system}}\n{{/if}}{{#if description}}{{description}}\n{{/if}}{{#if personality}}{{char}}'s personality: {{personality}}\n{{/if}}{{#if scenario}}Scenario: {{scenario}}\n{{/if}}{{#if persona}}{{persona}}\n{{/if}}";
 const defaultExampleSeparator = '***';
 const defaultChatStart = '***';
+
+export const ui_mode = {
+    SIMPLE: 0,
+    POWER: 1,
+}
 
 const avatar_styles = {
     ROUND: 0,
@@ -61,12 +66,6 @@ export const chat_styles = {
     DOCUMENT: 2,
 }
 
-const pygmalion_options = {
-    DISABLED: -1,
-    AUTO: 0,
-    ENABLED: 1,
-}
-
 const send_on_enter_options = {
     DISABLED: -1,
     AUTO: 0,
@@ -74,7 +73,10 @@ const send_on_enter_options = {
 }
 
 export const persona_description_positions = {
-    BEFORE_CHAR: 0,
+    IN_PROMPT: 0,
+    /**
+     * @deprecated Use persona_description_positions.IN_PROMPT instead.
+     */
     AFTER_CHAR: 1,
     TOP_AN: 2,
     BOTTOM_AN: 3,
@@ -84,7 +86,6 @@ let power_user = {
     tokenizer: tokenizers.BEST_MATCH,
     token_padding: 64,
     collapse_newlines: false,
-    pygmalion_formatting: pygmalion_options.AUTO,
     pin_examples: false,
     strip_examples: false,
     trim_sentences: false,
@@ -97,6 +98,7 @@ let power_user = {
     multigen_next_chunks: 30,
     markdown_escape_strings: '',
 
+    ui_mode: ui_mode.POWER,
     fast_ui_mode: true,
     avatar_style: avatar_styles.ROUND,
     chat_display: chat_styles.DEFAULT,
@@ -149,12 +151,14 @@ let power_user = {
     timestamp_model_icon: false,
     mesIDDisplay_enabled: false,
     max_context_unlocked: false,
+    message_token_count_enabled: false,
     prefer_character_prompt: true,
     prefer_character_jailbreak: true,
     quick_continue: false,
     continue_on_send: false,
     trim_spaces: true,
     relaxed_api_urls: false,
+    disable_group_trimming: false,
 
     default_instruct: '',
     instruct: {
@@ -176,6 +180,7 @@ let power_user = {
         activation_regex: "",
     },
 
+    default_context: 'Default',
     context: {
         preset: 'Default',
         story_string: defaultStoryString,
@@ -188,7 +193,7 @@ let power_user = {
     persona_descriptions: {},
 
     persona_description: '',
-    persona_description_position: persona_description_positions.BEFORE_CHAR,
+    persona_description_position: persona_description_positions.IN_PROMPT,
     persona_show_notifications: true,
 
     custom_stopping_strings: '',
@@ -196,6 +201,7 @@ let power_user = {
     fuzzy_search: false,
     encode_tags: false,
     lazy_load: 0,
+    servers: [],
 };
 
 let themes = [];
@@ -228,9 +234,17 @@ const storage_keys = {
     timestamps_enabled: 'TimestampsEnabled',
     timestamp_model_icon: 'TimestampModelIcon',
     mesIDDisplay_enabled: 'mesIDDisplayEnabled',
+    message_token_count_enabled: 'MessageTokenCountEnabled',
 };
 
 let browser_has_focus = true;
+const debug_functions = [];
+
+export function switchSimpleMode() {
+    $('[data-newbie-hidden]').each(function () {
+        $(this).toggleClass('displayNone', power_user.ui_mode === ui_mode.SIMPLE);
+    });
+}
 
 function playMessageSound() {
     if (!power_user.play_message_sound) {
@@ -264,6 +278,7 @@ function collapseNewlines(x) {
 /**
  * Fix formatting problems in markdown.
  * @param {string} text Text to be processed.
+ * @param {boolean} forDisplay Whether the text is being processed for display.
  * @returns {string} Processed text.
  * @example
  * "^example * text*\n" // "^example *text*\n"
@@ -277,7 +292,7 @@ function collapseNewlines(x) {
  * // and you HAVE to handle the cases where multiple pairs of asterisks exist in the same line
  * "^example * text* * harder problem *\n" // "^example *text* *harder problem*\n"
  */
-function fixMarkdown(text) {
+function fixMarkdown(text, forDisplay) {
     // Find pairs of formatting characters and capture the text in between them
     const format = /([\*_]{1,2})([\s\S]*?)\1/gm;
     let matches = [];
@@ -293,6 +308,27 @@ function fixMarkdown(text) {
         let replacementText = matchText.replace(/(\*|_)([\t \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]+)|([\t \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]+)(\*|_)/g, '$1$4');
         newText = newText.slice(0, matches[i].index) + replacementText + newText.slice(matches[i].index + matchText.length);
     }
+
+    // Don't auto-fix asterisks if this is a message clean-up procedure.
+    // It botches the continue function. Apply this to display only.
+    if (!forDisplay) {
+        return newText;
+    }
+
+    const splitText = newText.split('\n');
+
+    // Fix asterisks, and quotes that are not paired
+    for (let index = 0; index < splitText.length; index++) {
+        const line = splitText[index];
+        const charsToCheck = ['*', '"'];
+        for (const char of charsToCheck) {
+            if (line.includes(char) && isOdd(countOccurrences(line, char))) {
+                splitText[index] = line.trimEnd() + char;
+            }
+        }
+    }
+
+    newText = splitText.join('\n');
 
     return newText;
 }
@@ -323,6 +359,13 @@ function switchIcons() {
     power_user.timestamp_model_icon = value === null ? true : value == "true";
     $("body").toggleClass("no-modelIcons", !power_user.timestamp_model_icon);
     $("#messageModelIconEnabled").prop("checked", power_user.timestamp_model_icon);
+}
+
+function switchTokenCount() {
+    const value = localStorage.getItem(storage_keys.message_token_count_enabled);
+    power_user.message_token_count_enabled = value === null ? false : value == "true";
+    $("body").toggleClass("no-tokenCount", !power_user.message_token_count_enabled);
+    $("#messageTokensEnabled").prop("checked", power_user.message_token_count_enabled);
 }
 
 function switchMesIDDisplay() {
@@ -580,42 +623,49 @@ async function applyTheme(name) {
                     power_user.chat_width = 50;
                 }
 
-                localStorage.setItem(storage_keys.chat_width, power_user.chat_width);
+                localStorage.setItem(storage_keys.chat_width, String(power_user.chat_width));
                 applyChatWidth();
             }
         },
         {
             key: 'timer_enabled',
             action: async () => {
-                localStorage.setItem(storage_keys.timer_enabled, power_user.timer_enabled);
+                localStorage.setItem(storage_keys.timer_enabled, String(power_user.timer_enabled));
                 switchTimer();
             }
         },
         {
             key: 'timestamps_enabled',
             action: async () => {
-                localStorage.setItem(storage_keys.timestamps_enabled, power_user.timestamps_enabled);
+                localStorage.setItem(storage_keys.timestamps_enabled, String(power_user.timestamps_enabled));
                 switchTimestamps();
             }
         },
         {
             key: 'timestamp_model_icon',
             action: async () => {
-                localStorage.setItem(storage_keys.timestamp_model_icon, power_user.timestamp_model_icon);
+                localStorage.setItem(storage_keys.timestamp_model_icon, String(power_user.timestamp_model_icon));
                 switchIcons();
+            }
+        },
+        {
+            key: 'message_token_count',
+            action: async () => {
+                localStorage.setItem(storage_keys.message_token_count_enabled, String(power_user.message_token_count_enabled));
+                switchTokenCount();
             }
         },
         {
             key: 'mesIDDisplay_enabled',
             action: async () => {
-                localStorage.setItem(storage_keys.mesIDDisplay_enabled, power_user.mesIDDisplay_enabled);
+                localStorage.setItem(storage_keys.mesIDDisplay_enabled, String(power_user.mesIDDisplay_enabled));
                 switchMesIDDisplay();
             }
         },
         {
             key: 'hotswap_enabled',
             action: async () => {
-                localStorage.setItem(storage_keys.hotswap_enabled, power_user.hotswap_enabled);
+                localStorage.setItem(storage_keys.hotswap_enabled, String(power_user.hotswap_enabled));
                 switchHotswap();
             }
         }
@@ -652,6 +702,22 @@ async function applyMovingUIPreset(name) {
     loadMovingUIState()
 }
 
+/**
+ * Register a function to be executed when the debug menu is opened.
+ * @param {string} functionId Unique ID for the function.
+ * @param {string} name Name of the function.
+ * @param {string} description Description of the function.
+ * @param {function} func Function to be executed.
+ */
+export function registerDebugFunction(functionId, name, description, func) {
+    debug_functions.push({ functionId, name, description, func });
+}
+
+function showDebugMenu() {
+    const template = renderTemplate('debug', { functions: debug_functions });
+    callPopup(template, 'text', '', { wide: true, large: true });
+}
+
 switchUiMode();
 applyFontScale('forced');
 applyThemeColor();
@@ -666,6 +732,7 @@ switchTimer();
 switchTimestamps();
 switchIcons();
 switchMesIDDisplay();
+switchTokenCount();
 
 function loadPowerUserSettings(settings, data) {
     // Load from settings.json
@@ -719,6 +786,10 @@ function loadPowerUserSettings(settings, data) {
         power_user.chat_width = 50;
     }
 
+    if (power_user.tokenizer === tokenizers.LEGACY) {
+        power_user.tokenizer = tokenizers.GPT2;
+    }
+
     $('#relaxed_api_urls').prop("checked", power_user.relaxed_api_urls);
     $('#trim_spaces').prop("checked", power_user.trim_spaces);
     $('#continue_on_send').prop("checked", power_user.continue_on_send);
@@ -739,7 +810,6 @@ function loadPowerUserSettings(settings, data) {
     $('#auto_fix_generated_markdown').prop("checked", power_user.auto_fix_generated_markdown);
     $('#auto_scroll_chat_to_bottom').prop("checked", power_user.auto_scroll_chat_to_bottom);
     $(`#tokenizer option[value="${power_user.tokenizer}"]`).attr('selected', true);
-    $(`#pygmalion_formatting option[value=${power_user.pygmalion_formatting}]`).attr("selected", true);
     $(`#send_on_enter option[value=${power_user.send_on_enter}]`).attr("selected", true);
     $("#import_card_tags").prop("checked", power_user.import_card_tags);
     $("#confirm_message_delete").prop("checked", power_user.confirm_message_delete !== undefined ? !!power_user.confirm_message_delete : true);
@@ -751,6 +821,7 @@ function loadPowerUserSettings(settings, data) {
     $("#trim_sentences_checkbox").prop("checked", power_user.trim_sentences);
     $("#include_newline_checkbox").prop("checked", power_user.include_newline);
     $('#render_formulas').prop("checked", power_user.render_formulas);
+    $('#disable_group_trimming').prop("checked", power_user.disable_group_trimming);
     $("#markdown_escape_strings").val(power_user.markdown_escape_strings);
     $("#fast_ui_mode").prop("checked", power_user.fast_ui_mode);
     $("#waifuMode").prop("checked", power_user.waifuMode);
@@ -798,6 +869,7 @@ function loadPowerUserSettings(settings, data) {
     $("#user-mes-blur-tint-color-picker").attr('color', power_user.user_mes_blur_tint_color);
     $("#bot-mes-blur-tint-color-picker").attr('color', power_user.bot_mes_blur_tint_color);
     $("#shadow-color-picker").attr('color', power_user.shadow_color);
+    $("#ui_mode_select").val(power_user.ui_mode).find(`option[value="${power_user.ui_mode}"]`).attr('selected', true);
 
     for (const theme of themes) {
         const option = document.createElement('option');
@@ -825,6 +897,7 @@ function loadPowerUserSettings(settings, data) {
     switchSpoilerMode();
     loadMovingUIState();
     loadCharListState();
+    switchSimpleMode();
 }
 
 async function loadCharListState() {
@@ -877,13 +950,16 @@ function loadMaxContextUnlocked() {
 }
 
 function switchMaxContextSize() {
-    const element = $('#max_context');
+    const elements = [$('#max_context'), $('#rep_pen_range'), $('#rep_pen_range_textgenerationwebui')];
     const maxValue = power_user.max_context_unlocked ? MAX_CONTEXT_UNLOCKED : MAX_CONTEXT_DEFAULT;
-    element.attr('max', maxValue);
-    const value = Number(element.val());
 
-    if (value >= maxValue) {
-        element.val(maxValue).trigger('input');
+    for (const element of elements) {
+        element.attr('max', maxValue);
+        const value = Number(element.val());
+
+        if (value >= maxValue) {
+            element.val(maxValue).trigger('input');
+        }
     }
 }
 
@@ -951,7 +1027,31 @@ function loadContextSettings() {
                 break;
             }
         }
+
+        highlightDefaultContext();
+
+        saveSettingsDebounced();
     });
+
+    $('#context_set_default').on('click', function () {
+        if (power_user.context.preset !== power_user.default_context) {
+            power_user.default_context = power_user.context.preset;
+            $(this).addClass('default');
+            toastr.info(`Default context template set to ${power_user.default_context}`);
+
+            highlightDefaultContext();
+
+            saveSettingsDebounced();
+        }
+    });
+
+    highlightDefaultContext();
+}
+
+function highlightDefaultContext() {
+    $('#context_set_default').toggleClass('default', power_user.default_context === power_user.context.preset);
+    $('#context_set_default').toggleClass('disabled', power_user.default_context === power_user.context.preset);
+    $('#context_delete_preset').toggleClass('disabled', power_user.default_context === power_user.context.preset);
 }
 
 export function fuzzySearchCharacters(searchValue) {
@@ -1053,10 +1153,15 @@ const compareFunc = (first, second) => {
         return Math.random() > 0.5 ? 1 : -1;
     }
 
+    const a = first[power_user.sort_field];
+    const b = second[power_user.sort_field];
+
+    if (power_user.sort_field === 'create_date') {
+        return sortMoments(timestampToMoment(b), timestampToMoment(a));
+    }
+
     switch (power_user.sort_rule) {
         case 'boolean':
-            const a = first[power_user.sort_field];
-            const b = second[power_user.sort_field];
             if (a === true || a === 'true') return 1;  // Prioritize 'true' or true
             if (b === true || b === 'true') return -1; // Prioritize 'true' or true
             if (a && !b) return -1;        // Move truthy values to the end
@@ -1064,9 +1169,9 @@ const compareFunc = (first, second) => {
             if (a === b) return 0;         // Sort equal values normally
             return a < b ? -1 : 1;         // Sort non-boolean values normally
         default:
-            return typeof first[power_user.sort_field] == "string"
-                ? first[power_user.sort_field].localeCompare(second[power_user.sort_field])
-                : first[power_user.sort_field] - second[power_user.sort_field];
+            return typeof a == "string"
+                ? a.localeCompare(b)
+                : a - b;
     }
 };
 
@@ -1563,7 +1668,7 @@ function setAvgBG() {
 
 /**
  * Gets the custom stopping strings from the power user settings.
- * @param {number | undefined} limit Number of strings to return. If undefined, returns all strings.
+ * @param {number | undefined} limit Number of strings to return. If 0 or undefined, returns all strings.
  * @returns {string[]} An array of custom stopping strings
  */
 export function getCustomStoppingStrings(limit = undefined) {
@@ -1574,15 +1679,27 @@ export function getCustomStoppingStrings(limit = undefined) {
         }
 
         // Parse the JSON string
-        const strings = JSON.parse(power_user.custom_stopping_strings);
+        let strings = JSON.parse(power_user.custom_stopping_strings);
 
         // Make sure it's an array
         if (!Array.isArray(strings)) {
             return [];
         }
 
-        // Make sure all the elements are strings. Apply the limit.
-        return strings.filter((s) => typeof s === 'string').slice(0, limit);
+        // Make sure all the elements are strings.
+        strings = strings.filter((s) => typeof s === 'string');
+
+        // Substitute params if necessary
+        if (power_user.custom_stopping_strings_macro) {
+            strings = strings.map(x => substituteParams(x));
+        }
+
+        // Apply the limit. If limit is 0, return all strings.
+        if (limit > 0) {
+            strings = strings.slice(0, limit);
+        }
+
+        return strings;
     } catch (error) {
         // If there's an error, return an empty array
         console.warn('Error parsing custom stopping strings:', error);
@@ -1611,12 +1728,6 @@ $(document).ready(() => {
     // Settings that go to settings.json
     $("#collapse-newlines-checkbox").change(function () {
         power_user.collapse_newlines = !!$(this).prop("checked");
-        saveSettingsDebounced();
-    });
-
-    $("#pygmalion_formatting").change(function (e) {
-        power_user.pygmalion_formatting = Number($(this).find(":selected").val());
-        getStatus();
         saveSettingsDebounced();
     });
 
@@ -1988,6 +2099,13 @@ $(document).ready(() => {
         switchIcons();
     });
 
+    $("#messageTokensEnabled").on("input", function () {
+        const value = !!$(this).prop('checked');
+        power_user.message_token_count_enabled = value;
+        localStorage.setItem(storage_keys.message_token_count_enabled, String(power_user.message_token_count_enabled));
+        switchTokenCount();
+    });
+
     $("#mesIDDisplayEnabled").on("input", function () {
         const value = !!$(this).prop('checked');
         power_user.mesIDDisplay_enabled = value;
@@ -2079,6 +2197,33 @@ $(document).ready(() => {
     $('#lazy_load').on('input', function () {
         power_user.lazy_load = Number($(this).val());
         saveSettingsDebounced();
+    });
+
+    $('#disable_group_trimming').on('input', function () {
+        power_user.disable_group_trimming = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#debug_menu').on('click', function () {
+        showDebugMenu();
+    });
+
+    $("#ui_mode_select").on('change', function () {
+        const value = $(this).find(':selected').val();
+        power_user.ui_mode = Number(value);
+        saveSettingsDebounced();
+        switchSimpleMode();
+    });
+
+    $(document).on('click', '#debug_table [data-debug-function]', function () {
+        const functionId = $(this).data('debug-function');
+        const functionRecord = debug_functions.find(f => f.functionId === functionId);
+
+        if (functionRecord) {
+            functionRecord.func();
+        } else {
+            console.warn(`Debug function ${functionId} not found`);
+        }
     });
 
     $(window).on('focus', function () {

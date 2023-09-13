@@ -2,11 +2,13 @@ import { callPopup, eventSource, event_types, getRequestHeaders, saveSettingsDeb
 import { dragElement, isMobile } from "../../RossAscends-mods.js";
 import { getContext, getApiUrl, modules, extension_settings, ModuleWorkerWrapper, doExtrasFetch, renderExtensionTemplate } from "../../extensions.js";
 import { loadMovingUIState, power_user } from "../../power-user.js";
-import { onlyUnique, debounce, getCharaFilename } from "../../utils.js";
+import { registerSlashCommand } from "../../slash-commands.js";
+import { onlyUnique, debounce, getCharaFilename, trimToEndSentence, trimToStartSentence } from "../../utils.js";
 export { MODULE_NAME };
 
 const MODULE_NAME = 'expressions';
 const UPDATE_INTERVAL = 2000;
+const STREAMING_UPDATE_INTERVAL = 6000;
 const FALLBACK_EXPRESSION = 'joy';
 const DEFAULT_EXPRESSIONS = [
     "talkinghead",
@@ -45,6 +47,7 @@ let lastCharacter = undefined;
 let lastMessage = null;
 let spriteCache = {};
 let inApiCall = false;
+let lastServerResponseTime = 0;
 
 function isVisualNovelMode() {
     return Boolean(!isMobile() && power_user.waifuMode && getContext().groupId);
@@ -125,15 +128,7 @@ async function visualNovelSetCharacterSprites(container, name, expression) {
             continue;
         }
 
-        let spriteFolderName = character.name;
-        const avatarFileName = getSpriteFolderName({ original_avatar: character.avatar });
-        const expressionOverride = extension_settings.expressionOverrides.find((e) =>
-            e.name == avatarFileName
-        );
-
-        if (expressionOverride && expressionOverride.path) {
-            spriteFolderName = expressionOverride.path;
-        }
+        const spriteFolderName = getSpriteFolderName({ original_avatar: character.avatar }, character.name);
 
         // download images if not downloaded yet
         if (spriteCache[spriteFolderName] === undefined) {
@@ -270,16 +265,7 @@ async function setLastMessageSprite(img, avatar, labels) {
 
     if (lastMessage) {
         const text = lastMessage.mes || '';
-        let spriteFolderName = lastMessage.name;
-        const avatarFileName = getSpriteFolderName(lastMessage);
-        const expressionOverride = extension_settings.expressionOverrides.find((e) =>
-            e.name == avatarFileName
-        );
-
-        if (expressionOverride && expressionOverride.path) {
-            spriteFolderName = expressionOverride.path;
-        }
-
+        const spriteFolderName = getSpriteFolderName(lastMessage, lastMessage.name);
         const sprites = spriteCache[spriteFolderName] || [];
         const label = await getExpressionLabel(text);
         const path = labels.includes(label) ? sprites.find(x => x.label === label)?.path : '';
@@ -365,7 +351,7 @@ async function setImage(img, path) {
             expressionClone.removeClass('default');
             expressionClone.off('error');
             expressionClone.on('error', function () {
-                console.debug('Expression image error', sprite.path);
+                console.debug('Expression image error', path);
                 $(this).attr('src', '');
                 $(this).off('error');
                 resolve();
@@ -394,6 +380,11 @@ function onExpressionsShowDefaultInput() {
 }
 
 async function unloadLiveChar() {
+    if (!modules.includes('talkinghead')) {
+        console.debug('talkinghead module is disabled');
+        return;
+    }
+
     try {
         const url = new URL(getApiUrl());
         url.pathname = '/api/talkinghead/unload';
@@ -414,17 +405,7 @@ async function loadLiveChar() {
         return;
     }
 
-    const context = getContext();
-    let spriteFolderName = context.name2;
-    const message = getLastCharacterMessage();
-    const avatarFileName = getSpriteFolderName(message);
-    const expressionOverride = extension_settings.expressionOverrides.find((e) =>
-        e.name == avatarFileName
-    );
-
-    if (expressionOverride && expressionOverride.path) {
-        spriteFolderName = expressionOverride.path;
-    }
+    const spriteFolderName = getSpriteFolderName();
 
     const talkingheadPath = `/characters/${encodeURIComponent(spriteFolderName)}/talkinghead.png`;
 
@@ -463,19 +444,19 @@ async function loadLiveChar() {
 function handleImageChange() {
     const imgElement = document.querySelector('img#expression-image.expression');
 
-    if (!imgElement) {
+    if (!imgElement || !(imgElement instanceof HTMLImageElement)) {
         console.log("Cannot find addExpressionImage()");
         return;
     }
 
-    if (extension_settings.expressions.talkinghead) {
+    if (extension_settings.expressions.talkinghead && !extension_settings.expressions.local) {
         // Method get IP of endpoint
         const talkingheadResultFeedSrc = `${getApiUrl()}/api/talkinghead/result_feed`;
         $('#expression-holder').css({ display: '' });
         if (imgElement.src !== talkingheadResultFeedSrc) {
             const expressionImageElement = document.querySelector('.expression_list_image');
 
-            if (expressionImageElement) {
+            if (expressionImageElement && expressionImageElement instanceof HTMLImageElement) {
                 doExtrasFetch(expressionImageElement.src, {
                     method: 'HEAD',
                 })
@@ -498,6 +479,14 @@ function handleImageChange() {
 async function moduleWorker() {
     const context = getContext();
 
+    // Hide and disable talkinghead while in local mode
+    $('#image_type_block').toggle(!extension_settings.expressions.local);
+
+    if (extension_settings.expressions.local && extension_settings.expressions.talkinghead) {
+        $('#image_type_toggle').prop('checked', false);
+        setTalkingHeadState(false);
+    }
+
     // non-characters not supported
     if (!context.groupId && (context.characterId === undefined || context.characterId === 'invalid-safety-id')) {
         removeExpression();
@@ -511,12 +500,14 @@ async function moduleWorker() {
 
         //clear expression
         let imgElement = document.getElementById('expression-image');
-        imgElement.src = "";
+        if (imgElement && imgElement instanceof HTMLImageElement) {
+            imgElement.src = "";
+        }
 
         //set checkbox to global var
         $('#image_type_toggle').prop('checked', extension_settings.expressions.talkinghead);
         if (extension_settings.expressions.talkinghead) {
-            settalkingheadState(extension_settings.expressions.talkinghead);
+            setTalkingHeadState(extension_settings.expressions.talkinghead);
         }
     }
 
@@ -540,15 +531,7 @@ async function moduleWorker() {
     }
 
     const currentLastMessage = getLastCharacterMessage();
-    let spriteFolderName = currentLastMessage.name;
-    const avatarFileName = getSpriteFolderName(currentLastMessage);
-    const expressionOverride = extension_settings.expressionOverrides.find((e) =>
-        e.name == avatarFileName
-    );
-
-    if (expressionOverride && expressionOverride.path) {
-        spriteFolderName = expressionOverride.path;
-    }
+    let spriteFolderName = getSpriteFolderName(currentLastMessage, currentLastMessage.name);
 
     // character has no expressions or it is not loaded
     if (Object.keys(spriteCache).length === 0) {
@@ -557,8 +540,9 @@ async function moduleWorker() {
     }
 
     const offlineMode = $('.expression_settings .offline_mode');
-    if (!modules.includes('classify')) {
-        $('.expression_settings').show();
+    if (!modules.includes('classify') && !extension_settings.expressions.local) {
+        $('#open_chat_expressions').show();
+        $('#no_chat_expressions').hide();
         offlineMode.css('display', 'block');
         lastCharacter = context.groupId || context.characterId;
 
@@ -593,6 +577,17 @@ async function moduleWorker() {
         return;
     }
 
+    // Throttle classification requests during streaming
+    if (context.streamingProcessor && !context.streamingProcessor.isFinished) {
+        const now = Date.now();
+        const timeSinceLastServerResponse = now - lastServerResponseTime;
+
+        if (timeSinceLastServerResponse < STREAMING_UPDATE_INTERVAL) {
+            console.log('Streaming in progress: throttling expression update. Next update at ' + new Date(lastServerResponseTime + STREAMING_UPDATE_INTERVAL));
+            return;
+        }
+    }
+
     try {
         inApiCall = true;
         let expression = await getExpressionLabel(currentLastMessage.mes);
@@ -610,7 +605,6 @@ async function moduleWorker() {
         }
 
         await sendExpressionCall(spriteFolderName, expression, force, vnMode);
-
     }
     catch (error) {
         console.log(error);
@@ -619,21 +613,12 @@ async function moduleWorker() {
         inApiCall = false;
         lastCharacter = context.groupId || context.characterId;
         lastMessage = currentLastMessage.mes;
+        lastServerResponseTime = Date.now();
     }
 }
 
-async function talkingheadcheck() {
-    const context = getContext();
-    let spriteFolderName = context.name2;
-    const message = getLastCharacterMessage();
-    const avatarFileName = getSpriteFolderName(message);
-    const expressionOverride = extension_settings.expressionOverrides.find((e) =>
-        e.name == avatarFileName
-    );
-
-    if (expressionOverride && expressionOverride.path) {
-        spriteFolderName = expressionOverride.path;
-    }
+async function talkingHeadCheck() {
+    let spriteFolderName = getSpriteFolderName();
 
     try {
         await validateImages(spriteFolderName);
@@ -654,11 +639,29 @@ async function talkingheadcheck() {
     }
 }
 
-function settalkingheadState(switch_var) {
+function getSpriteFolderName(characterMessage = null, characterName = null) {
+    const context = getContext();
+    let spriteFolderName = characterName ?? context.name2;
+    const message = characterMessage ?? getLastCharacterMessage();
+    const avatarFileName = getFolderNameByMessage(message);
+    const expressionOverride = extension_settings.expressionOverrides.find(e => e.name == avatarFileName);
+
+    if (expressionOverride && expressionOverride.path) {
+        spriteFolderName = expressionOverride.path;
+    }
+
+    return spriteFolderName;
+}
+
+function setTalkingHeadState(switch_var) {
     extension_settings.expressions.talkinghead = switch_var; // Store setting
     saveSettingsDebounced();
 
-    talkingheadcheck().then(result => {
+    if (extension_settings.expressions.local) {
+        return;
+    }
+
+    talkingHeadCheck().then(result => {
         if (result) {
             //console.log("talkinghead exists!");
 
@@ -667,7 +670,7 @@ function settalkingheadState(switch_var) {
             } else {
                 unloadLiveChar();
             }
-            handleImageChange(switch_var); // Change image as needed
+            handleImageChange(); // Change image as needed
 
 
         } else {
@@ -676,7 +679,7 @@ function settalkingheadState(switch_var) {
     });
 }
 
-function getSpriteFolderName(message) {
+function getFolderNameByMessage(message) {
     const context = getContext();
     let avatarPath = '';
 
@@ -707,27 +710,102 @@ async function sendExpressionCall(name, expression, force, vnMode) {
     }
 }
 
+async function setSpriteSlashCommand(_, spriteId) {
+    if (!spriteId) {
+        console.log('No sprite id provided');
+        return;
+    }
+
+    spriteId = spriteId.trim().toLowerCase();
+
+    const spriteFolderName = getSpriteFolderName();
+    await validateImages(spriteFolderName);
+
+    // Fuzzy search for sprite
+    const fuse = new Fuse(spriteCache[spriteFolderName], { keys: ['label'] });
+    const results = fuse.search(spriteId);
+    const spriteItem = results[0]?.item;
+
+    if (!spriteItem) {
+        console.log('No sprite found for search term ' + spriteId);
+        return;
+    }
+
+    const vnMode = isVisualNovelMode();
+    await sendExpressionCall(spriteFolderName, spriteItem.label, true, vnMode);
+}
+
+/**
+ * Processes the classification text to reduce the amount of text sent to the API.
+ * Quotes and asterisks are to be removed. If the text is less than 300 characters, it is returned as is.
+ * If the text is more than 300 characters, the first and last 150 characters are returned.
+ * The result is trimmed to the end of sentence.
+ * @param {string} text The text to process.
+ * @returns {string}
+ */
+function sampleClassifyText(text) {
+    if (!text) {
+        return text;
+    }
+
+    // Remove asterisks and quotes
+    let result = text.replace(/[\*\"]/g, '');
+
+    const SAMPLE_THRESHOLD = 300;
+    const HALF_SAMPLE_THRESHOLD = SAMPLE_THRESHOLD / 2;
+
+    if (text.length < SAMPLE_THRESHOLD) {
+        result = trimToEndSentence(result);
+    } else {
+        result = trimToEndSentence(result.slice(0, HALF_SAMPLE_THRESHOLD)) + ' ' + trimToStartSentence(result.slice(-HALF_SAMPLE_THRESHOLD));
+    }
+
+    return result.trim();
+}
+
 async function getExpressionLabel(text) {
     // Return if text is undefined, saving a costly fetch request
-    if (!modules.includes('classify') || !text) {
+    if ((!modules.includes('classify') && !extension_settings.expressions.local) || !text) {
         return FALLBACK_EXPRESSION;
     }
 
-    const url = new URL(getApiUrl());
-    url.pathname = '/api/classify';
+    text = sampleClassifyText(text);
 
-    const apiResult = await doExtrasFetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Bypass-Tunnel-Reminder': 'bypass',
-        },
-        body: JSON.stringify({ text: text }),
-    });
+    try {
+        if (extension_settings.expressions.local) {
+            // Local transformers pipeline
+            const apiResult = await fetch('/api/extra/classify', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ text: text }),
+            });
 
-    if (apiResult.ok) {
-        const data = await apiResult.json();
-        return data.classification[0].label;
+            if (apiResult.ok) {
+                const data = await apiResult.json();
+                return data.classification[0].label;
+            }
+        } else {
+            // Extras
+            const url = new URL(getApiUrl());
+            url.pathname = '/api/classify';
+
+            const apiResult = await doExtrasFetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Bypass-Tunnel-Reminder': 'bypass',
+                },
+                body: JSON.stringify({ text: text }),
+            });
+
+            if (apiResult.ok) {
+                const data = await apiResult.json();
+                return data.classification[0].label;
+            }
+        }
+    } catch (error) {
+        console.log(error);
+        return FALLBACK_EXPRESSION;
     }
 }
 
@@ -751,7 +829,8 @@ function removeExpression() {
     $('img.expression').off('error');
     $('img.expression').prop('src', '');
     $('img.expression').removeClass('default');
-    $('.expression_settings').hide();
+    $('#open_chat_expressions').hide();
+    $('#no_chat_expressions').show();
 }
 
 async function validateImages(character, forceRedrawCached) {
@@ -777,9 +856,11 @@ async function validateImages(character, forceRedrawCached) {
 
 function drawSpritesList(character, labels, sprites) {
     let validExpressions = [];
-    $('.expression_settings').show();
+    $('#no_chat_expressions').hide();
+    $('#open_chat_expressions').show();
     $('#image_list').empty();
     $('#image_list').data('name', character);
+    $('#image_list_header_name').text(character);
 
     if (!Array.isArray(labels)) {
         return [];
@@ -819,7 +900,7 @@ async function getSpritesList(name) {
 
 async function getExpressionsList() {
     // get something for offline mode (default images)
-    if (!modules.includes('classify')) {
+    if (!modules.includes('classify') && !extension_settings.expressions.local) {
         return DEFAULT_EXPRESSIONS;
     }
 
@@ -827,20 +908,34 @@ async function getExpressionsList() {
         return expressionsList;
     }
 
-    const url = new URL(getApiUrl());
-    url.pathname = '/api/classify/labels';
 
     try {
-        const apiResult = await doExtrasFetch(url, {
-            method: 'GET',
-            headers: { 'Bypass-Tunnel-Reminder': 'bypass' },
-        });
+        if (extension_settings.expressions.local) {
+            const apiResult = await fetch('/api/extra/classify/labels', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+            });
 
-        if (apiResult.ok) {
+            if (apiResult.ok) {
+                const data = await apiResult.json();
+                expressionsList = data.labels;
+                return expressionsList;
+            }
+        } else {
+            const url = new URL(getApiUrl());
+            url.pathname = '/api/classify/labels';
 
-            const data = await apiResult.json();
-            expressionsList = data.labels;
-            return expressionsList;
+            const apiResult = await doExtrasFetch(url, {
+                method: 'GET',
+                headers: { 'Bypass-Tunnel-Reminder': 'bypass' },
+            });
+
+            if (apiResult.ok) {
+
+                const data = await apiResult.json();
+                expressionsList = data.labels;
+                return expressionsList;
+            }
         }
     }
     catch (error) {
@@ -850,7 +945,7 @@ async function getExpressionsList() {
 }
 
 async function setExpression(character, expression, force) {
-    if (!extension_settings.expressions.talkinghead) {
+    if (extension_settings.expressions.local || !extension_settings.expressions.talkinghead) {
         console.debug('entered setExpressions');
         await validateImages(character);
         const img = $('img.expression');
@@ -963,12 +1058,12 @@ async function setExpression(character, expression, force) {
     } else {
 
 
-        talkingheadcheck().then(result => {
+        talkingHeadCheck().then(result => {
             if (result) {
                 // Find the <img> element with id="expression-image" and class="expression"
                 const imgElement = document.querySelector('img#expression-image.expression');
                 //console.log("searching");
-                if (imgElement) {
+                if (imgElement && imgElement instanceof HTMLImageElement) {
                     //console.log("setting value");
                     imgElement.src = getApiUrl() + '/api/talkinghead/result_feed';
                 }
@@ -983,18 +1078,10 @@ async function setExpression(character, expression, force) {
 }
 
 function onClickExpressionImage() {
-    // online mode doesn't need force set
-    if (modules.includes('classify')) {
-        return;
-    }
-
     const expression = $(this).attr('id');
-    const name = getLastCharacterMessage().name;
-
-    if ($(this).find('.failure').length === 0) {
-        setExpression(name, expression, true);
-    }
+    setSpriteSlashCommand({}, expression);
 }
+
 async function handleFileUpload(url, formData) {
     try {
         const data = await jQuery.ajax({
@@ -1052,7 +1139,7 @@ async function onClickExpressionUpload(event) {
 async function onClickExpressionOverrideButton() {
     const context = getContext();
     const currentLastMessage = getLastCharacterMessage();
-    const avatarFileName = getSpriteFolderName(currentLastMessage);
+    const avatarFileName = getFolderNameByMessage(currentLastMessage);
 
     // If the avatar name couldn't be found, abort.
     if (!avatarFileName) {
@@ -1061,7 +1148,7 @@ async function onClickExpressionOverrideButton() {
         return;
     }
 
-    const overridePath = $("#expression_override").val();
+    const overridePath = String($("#expression_override").val());
     const existingOverrideIndex = extension_settings.expressionOverrides.findIndex((e) =>
         e.name == avatarFileName
     );
@@ -1186,7 +1273,7 @@ async function onClickExpressionDelete(event) {
 
 function setExpressionOverrideHtml(forceClear = false) {
     const currentLastMessage = getLastCharacterMessage();
-    const avatarFileName = getSpriteFolderName(currentLastMessage);
+    const avatarFileName = getFolderNameByMessage(currentLastMessage);
     if (!avatarFileName) {
         return;
     }
@@ -1232,6 +1319,11 @@ function setExpressionOverrideHtml(forceClear = false) {
         $('#expressions_show_default').on('input', onExpressionsShowDefaultInput);
         $('#expression_upload_pack_button').on('click', onClickExpressionUploadPackButton);
         $('#expressions_show_default').prop('checked', extension_settings.expressions.showDefault).trigger('input');
+        $('#expression_local').prop('checked', extension_settings.expressions.local).on('input', function () {
+            extension_settings.expressions.local = !!$(this).prop('checked');
+            moduleWorker();
+            saveSettingsDebounced();
+        });
         $('#expression_override_cleanup_button').on('click', onClickExpressionOverrideRemoveAllButton);
         $(document).on('dragstart', '.expression', (e) => {
             e.preventDefault()
@@ -1241,10 +1333,12 @@ function setExpressionOverrideHtml(forceClear = false) {
         $(document).on('click', '.expression_list_upload', onClickExpressionUpload);
         $(document).on('click', '.expression_list_delete', onClickExpressionDelete);
         $(window).on("resize", updateVisualNovelModeDebounced);
-        $('.expression_settings').hide();
+        $("#open_chat_expressions").hide();
 
         $('#image_type_toggle').on('click', function () {
-            settalkingheadState(this.checked);
+            if (this instanceof HTMLInputElement) {
+                setTalkingHeadState(this.checked);
+            }
         });
     }
 
@@ -1265,4 +1359,5 @@ function setExpressionOverrideHtml(forceClear = false) {
     });
     eventSource.on(event_types.MOVABLE_PANELS_RESET, updateVisualNovelModeDebounced);
     eventSource.on(event_types.GROUP_UPDATED, updateVisualNovelModeDebounced);
+    registerSlashCommand('sprite', setSpriteSlashCommand, ['emote'], '<span class="monospace">spriteId</span> – force sets the sprite for the current character', true, true);
 })();
