@@ -49,6 +49,7 @@
     overflow: hidden;
     resize: both;
     display: flex;
+    justify-content: center;
 }
 
 #no_chat_expressions {
@@ -123,6 +124,8 @@ img.expression.default {
     display: flex;
     justify-content: center;
     align-items: center;
+    flex-direction: column;
+    line-height: 1;
 }
 
 .expression_list_buttons {

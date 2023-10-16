@@ -20,12 +20,14 @@ import {
     generateQuietPrompt,
     reloadCurrentChat,
     sendMessageAsUser,
+    name1,
 } from "../script.js";
 import { getMessageTimeStamp } from "./RossAscends-mods.js";
 import { resetSelectedGroup } from "./group-chats.js";
 import { getRegexedString, regex_placement } from "./extensions/regex/engine.js";
 import { chat_styles, power_user } from "./power-user.js";
 import { autoSelectPersona } from "./personas.js";
+import { getContext } from "./extensions.js";
 export {
     executeSlashCommands,
     registerSlashCommand,
@@ -55,7 +57,7 @@ class SlashCommandParser {
 
         let stringBuilder = `<span class="monospace">/${command}</span> ${helpString} `;
         if (Array.isArray(aliases) && aliases.length) {
-            let aliasesString = `(aliases: ${aliases.map(x => `<span class="monospace">/${x}</span>`).join(', ')})`;
+            let aliasesString = `(alias: ${aliases.map(x => `<span class="monospace">/${x}</span>`).join(', ')})`;
             stringBuilder += aliasesString;
         }
         this.helpStrings.push(stringBuilder);
@@ -103,7 +105,10 @@ class SlashCommandParser {
 
     getHelpString() {
         const listItems = this.helpStrings.map(x => `<li>${x}</li>`).join('\n');
-        return `<p>Slash commands:</p><ol>${listItems}</ol>`;
+        return `<p>Slash commands:</p><ol>${listItems}</ol>
+        <small>Slash commands can be batched into a single input by adding a pipe character | at the end, and then writing a new slash command.</small>
+        <ul><li><small>Example:</small><code>/cut 1 | /sys Hello, | /continue</code></li>
+        <li>This will remove the first message in chat, send a system message that starts with 'Hello,', and then ask the AI to continue the message.</li></ul>`;
     }
 }
 
@@ -116,8 +121,8 @@ parser.addCommand('name', setNameCallback, ['persona'], '<span class="monospace"
 parser.addCommand('sync', syncCallback, [], ' – syncs user name in user-attributed messages in the current chat', true, true);
 parser.addCommand('lock', bindCallback, ['bind'], ' – locks/unlocks a persona (name and avatar) to the current chat', true, true);
 parser.addCommand('bg', setBackgroundCallback, ['background'], '<span class="monospace">(filename)</span> – sets a background according to filename, partial names allowed, will set the first one alphabetically if multiple files begin with the provided argument string', false, true);
-parser.addCommand('sendas', sendMessageAs, [], ` – sends message as a specific character.<br>Example:<br><pre><code>/sendas Chloe\nHello, guys!</code></pre>will send "Hello, guys!" from "Chloe".<br>Uses character avatar if it exists in the characters list.`, true, true);
-parser.addCommand('sys', sendNarratorMessage, [], '<span class="monospace">(text)</span> – sends message as a system narrator', false, true);
+parser.addCommand('sendas', sendMessageAs, [], ` – sends message as a specific character. Uses character avatar if it exists in the characters list. Example that will send "Hello, guys!" from "Chloe": <pre><code>/sendas Chloe&#10;Hello, guys!</code></pre>`, true, true);
+parser.addCommand('sys', sendNarratorMessage, ['nar'], '<span class="monospace">(text)</span> – sends message as a system narrator', false, true);
 parser.addCommand('sysname', setNarratorName, [], '<span class="monospace">(name)</span> – sets a name for future system narrator messages in this chat (display only). Default: System. Leave empty to reset.', true, true);
 parser.addCommand('comment', sendCommentMessage, [], '<span class="monospace">(text)</span> – adds a note/comment message not part of the chat', false, true);
 parser.addCommand('single', setStoryModeCallback, ['story'], ' – sets the message style to single document mode without names or avatars visible', true, true);
@@ -225,7 +230,7 @@ function continueChatCallback() {
     $('#option_continue').trigger('click', { fromSlashCommand: true });
 }
 
-async function generateSystemMessage(_, prompt) {
+export async function generateSystemMessage(_, prompt) {
     $('#send_textarea').val('');
 
     if (!prompt) {
@@ -289,7 +294,7 @@ async function setNarratorName(_, text) {
     await saveChatConditional();
 }
 
-async function sendMessageAs(_, text) {
+export async function sendMessageAs(_, text) {
     if (!text) {
         return;
     }
@@ -325,7 +330,6 @@ async function sendMessageAs(_, text) {
     const message = {
         name: name,
         is_user: false,
-        is_name: true,
         is_system: isSystem,
         send_date: getMessageTimeStamp(),
         mes: substituteParams(mesText),
@@ -344,7 +348,7 @@ async function sendMessageAs(_, text) {
     await saveChatConditional();
 }
 
-async function sendNarratorMessage(_, text) {
+export async function sendNarratorMessage(_, text) {
     if (!text) {
         return;
     }
@@ -357,7 +361,6 @@ async function sendNarratorMessage(_, text) {
     const message = {
         name: name,
         is_user: false,
-        is_name: false,
         is_system: isSystem,
         send_date: getMessageTimeStamp(),
         mes: substituteParams(text.trim()),
@@ -376,6 +379,45 @@ async function sendNarratorMessage(_, text) {
     await saveChatConditional();
 }
 
+export async function promptQuietForLoudResponse(who, text) {
+
+    let character_id = getContext().characterId;
+    if (who === 'sys') {
+        text = "System: " + text;
+    } else if (who === 'user') {
+        text = name1 + ": " + text;
+    } else if (who === 'char') {
+        text = characters[character_id].name + ": " + text;
+    } else if (who === 'raw') {
+        text = text;
+    }
+
+    //text = `${text}${power_user.instruct.enabled ? '' : '\n'}${(power_user.always_force_name2 && who != 'raw') ? characters[character_id].name + ":" : ""}`
+
+    let reply = await generateQuietPrompt(text, true);
+    text = await getRegexedString(reply, regex_placement.SLASH_COMMAND);
+
+    const message = {
+        name: characters[character_id].name,
+        is_user: false,
+        is_name: true,
+        is_system: false,
+        send_date: getMessageTimeStamp(),
+        mes: substituteParams(text.trim()),
+        extra: {
+            type: system_message_types.COMMENT,
+            gen_id: Date.now(),
+        },
+    };
+
+    chat.push(message);
+    await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
+    addOneMessage(message);
+    await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
+    await saveChatConditional();
+
+}
+
 async function sendCommentMessage(_, text) {
     if (!text) {
         return;
@@ -384,7 +426,6 @@ async function sendCommentMessage(_, text) {
     const message = {
         name: COMMENT_NAME_DEFAULT,
         is_user: false,
-        is_name: true,
         is_system: true,
         send_date: getMessageTimeStamp(),
         mes: substituteParams(text.trim()),

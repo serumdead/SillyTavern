@@ -1,4 +1,4 @@
-import { callPopup, cancelTtsPlay, eventSource, event_types, isMultigenEnabled, is_send_press, saveSettingsDebounced } from '../../../script.js'
+import { callPopup, cancelTtsPlay, eventSource, event_types, saveSettingsDebounced } from '../../../script.js'
 import { ModuleWorkerWrapper, doExtrasFetch, extension_settings, getApiUrl, getContext, modules } from '../../extensions.js'
 import { escapeRegex, getStringHash } from '../../utils.js'
 import { EdgeTtsProvider } from './edge.js'
@@ -8,7 +8,6 @@ import { CoquiTtsProvider } from './coqui.js'
 import { SystemTtsProvider } from './system.js'
 import { NovelTtsProvider } from './novel.js'
 import { power_user } from '../../power-user.js'
-import { rvcVoiceConversion } from "../rvc/index.js"
 export { talkingAnimation };
 
 const UPDATE_INTERVAL = 1000
@@ -115,11 +114,6 @@ async function moduleWorker() {
     // no characters or group selected
     if (!context.groupId && context.characterId === undefined) {
         return
-    }
-
-    // Multigen message is currently being generated
-    if (is_send_press && isMultigenEnabled()) {
-        return;
     }
 
     // Chat changed
@@ -420,8 +414,8 @@ async function tts(text, voiceId, char) {
     let response = await ttsProvider.generateTts(text, voiceId)
 
     // RVC injection
-    if (extension_settings.rvc.enabled)
-        response = await rvcVoiceConversion(response, char, text)
+    if (extension_settings.rvc.enabled && typeof window['rvcVoiceConversion'] === 'function')
+        response = await window['rvcVoiceConversion'](response, char, text)
 
     addAudioJob(response)
     completeTtsJob()

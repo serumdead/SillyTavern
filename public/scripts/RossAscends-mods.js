@@ -31,7 +31,7 @@ import {
     SECRET_KEYS,
     secret_state,
 } from "./secrets.js";
-import { debounce, delay, getStringHash, isUrlOrAPIKey, waitUntilCondition } from "./utils.js";
+import { debounce, delay, getStringHash, isValidUrl, waitUntilCondition } from "./utils.js";
 import { chat_completion_sources, oai_settings } from "./openai.js";
 import { getTokenCount } from "./tokenizers.js";
 
@@ -279,9 +279,15 @@ export async function favsToHotswap() {
     const entities = getEntitiesList({ doFilter: false });
     const container = $('#right-nav-panel .hotswap');
     const template = $('#hotswap_template .hotswapAvatar');
-    container.empty();
-    const maxCount = 6;
+    const DEFAULT_COUNT = 6;
+    const WIDTH_PER_ITEM = 60; // 50px + 5px gap + 5px padding
+    const containerWidth = container.outerWidth();
+    const maxCount = containerWidth > 0 ? Math.floor(containerWidth / WIDTH_PER_ITEM) : DEFAULT_COUNT;
     let count = 0;
+
+    const promises = [];
+    const newContainer = container.clone();
+    newContainer.empty();
 
     for (const entity of entities) {
         if (count >= maxCount) {
@@ -315,22 +321,38 @@ export async function favsToHotswap() {
         }
 
         if (isCharacter) {
-            const avatarUrl = getThumbnailUrl('avatar', entity.item.avatar);
-            $(slot).find('img').attr('src', avatarUrl);
-            $(slot).attr('title', entity.item.avatar);
+            const imgLoadPromise = new Promise((resolve) => {
+                const avatarUrl = getThumbnailUrl('avatar', entity.item.avatar);
+                $(slot).find('img').attr('src', avatarUrl).on('load', resolve);
+                $(slot).attr('title', entity.item.avatar);
+            });
+
+            // if the image doesn't load in 500ms, resolve the promise anyway
+            promises.push(Promise.race([imgLoadPromise, delay(500)]));
         }
 
         $(slot).css('cursor', 'pointer');
-        container.append(slot);
+        newContainer.append(slot);
         count++;
     }
 
-    // there are 6 slots in total,
-    if (count < maxCount) { //if any are left over
+    // don't fill leftover spaces with avatar placeholders
+    // just evenly space the selected avatars instead
+    /*
+   if (count < maxCount) { //if any space is left over
         let leftOverSlots = maxCount - count;
         for (let i = 1; i <= leftOverSlots; i++) {
-            container.append(template.clone());
+            newContainer.append(template.clone());
         }
+    }
+    */
+
+    await Promise.allSettled(promises);
+    //helpful instruction message if no characters are favorited
+    if (count === 0) { container.html(`<small><span><i class="fa-solid fa-star"></i> Favorite characters to add them to HotSwaps</span></small>`) }
+    //otherwise replace with fav'd characters
+    if (count > 0) {
+        container.replaceWith(newContainer);
     }
 }
 
@@ -372,7 +394,7 @@ function RA_autoconnect(PrevApi) {
     if (online_status === "no_connection" && LoadLocalBool('AutoConnectEnabled')) {
         switch (main_api) {
             case 'kobold':
-                if (api_server && isUrlOrAPIKey(api_server)) {
+                if (api_server && isValidUrl(api_server)) {
                     $("#api_button").click();
                 }
                 break;
@@ -382,7 +404,7 @@ function RA_autoconnect(PrevApi) {
                 }
                 break;
             case 'textgenerationwebui':
-                if (api_server_textgenerationwebui && isUrlOrAPIKey(api_server_textgenerationwebui)) {
+                if (api_server_textgenerationwebui && isValidUrl(api_server_textgenerationwebui)) {
                     $("#api_button_textgenerationwebui").click();
                 }
                 break;
@@ -393,6 +415,7 @@ function RA_autoconnect(PrevApi) {
                     || (oai_settings.chat_completion_source == chat_completion_sources.WINDOWAI)
                     || (secret_state[SECRET_KEYS.OPENROUTER] && oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER)
                     || (secret_state[SECRET_KEYS.AI21] && oai_settings.chat_completion_source == chat_completion_sources.AI21)
+                    || (secret_state[SECRET_KEYS.PALM] && oai_settings.chat_completion_source == chat_completion_sources.PALM)
                 ) {
                     $("#api_button_openai").click();
                 }
@@ -1100,13 +1123,14 @@ export function initRossMods() {
                 $("#rightNavDrawerIcon").trigger('click');
                 return
             }
+            if ($(".draggable").is(":visible")) {
+                // Remove the first matched element
+                $('.draggable:first').remove();
+                return;
+            }
         }
 
-        if ($(".draggable").is(":visible")) {
-            // Remove the first matched element
-            $('.draggable:first').remove();
-            return;
-        }
+
 
 
         if (event.ctrlKey && /^[1-9]$/.test(event.key)) {

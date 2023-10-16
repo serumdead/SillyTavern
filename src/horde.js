@@ -5,11 +5,51 @@ const { readSecret, SECRET_KEYS } = require("./secrets");
 
 const ANONYMOUS_KEY = "0000000000";
 
-function getHordeClient() {
+/**
+ * Returns the AIHorde client.
+ * @returns {Promise<AIHorde>} AIHorde client
+ */
+async function getHordeClient() {
+    const version = await getVersion();
     const ai_horde = new AIHorde({
-        client_agent: getVersion()?.agent || 'SillyTavern:UNKNOWN:Cohee#1207',
+        client_agent: version?.agent || 'SillyTavern:UNKNOWN:Cohee#1207',
     });
     return ai_horde;
+}
+
+/**
+ * Removes dirty no-no words from the prompt.
+ * Taken verbatim from KAI Lite's implementation (AGPLv3).
+ * https://github.com/LostRuins/lite.koboldai.net/blob/main/index.html#L7786C2-L7811C1
+ * @param {string} prompt Prompt to sanitize
+ * @returns {string} Sanitized prompt
+ */
+function sanitizeHordeImagePrompt(prompt) {
+    if (!prompt) {
+        return "";
+    }
+
+    //to avoid flagging from some image models, always swap these words
+    prompt = prompt.replace(/\b(girl)\b/gmi, "woman");
+    prompt = prompt.replace(/\b(boy)\b/gmi, "man");
+    prompt = prompt.replace(/\b(girls)\b/gmi, "women");
+    prompt = prompt.replace(/\b(boys)\b/gmi, "men");
+
+    //always remove these high risk words from prompt, as they add little value to image gen while increasing the risk the prompt gets flagged
+    prompt = prompt.replace(/\b(under.age|under.aged|underage|underaged|loli|pedo|pedophile|(\w+).year.old|(\w+).years.old|minor|prepubescent|minors|shota)\b/gmi, "");
+
+    //if nsfw is detected, do not remove it but apply additional precautions
+    let isNsfw = prompt.match(/\b(cock|ahegao|hentai|uncensored|lewd|cocks|deepthroat|deepthroating|dick|dicks|cumshot|lesbian|fuck|fucked|fucking|sperm|naked|nipples|tits|boobs|breasts|boob|breast|topless|ass|butt|fingering|masturbate|masturbating|bitch|blowjob|pussy|piss|asshole|dildo|dildos|vibrator|erection|foreskin|handjob|nude|penis|porn|vibrator|virgin|vagina|vulva|threesome|orgy|bdsm|hickey|condom|testicles|anal|bareback|bukkake|creampie|stripper|strap-on|missionary|clitoris|clit|clitty|cowgirl|fleshlight|sex|buttplug|milf|oral|sucking|bondage|orgasm|scissoring|railed|slut|sluts|slutty|cumming|cunt|faggot|sissy|anal|anus|cum|semen|scat|nsfw|xxx|explicit|erotic|horny|aroused|jizz|moan|rape|raped|raping|throbbing|humping)\b/gmi);
+
+    if (isNsfw) {
+        //replace risky subject nouns with person
+        prompt = prompt.replace(/\b(youngster|infant|baby|toddler|child|teen|kid|kiddie|kiddo|teenager|student|preteen|pre.teen)\b/gmi, "person");
+
+        //remove risky adjectives and related words
+        prompt = prompt.replace(/\b(young|younger|youthful|youth|small|smaller|smallest|girly|boyish|lil|tiny|teenaged|lit[tl]le|school.aged|school|highschool|kindergarten|teens|children|kids)\b/gmi, "");
+    }
+
+    return prompt;
 }
 
 /**
@@ -50,7 +90,7 @@ function registerEndpoints(app, jsonParser) {
 
     app.post('/api/horde/sd-samplers', jsonParser, async (_, response) => {
         try {
-            const ai_horde = getHordeClient();
+            const ai_horde = await getHordeClient();
             const samplers = Object.values(ai_horde.ModelGenerationInputStableSamplers);
             response.send(samplers);
         } catch (error) {
@@ -61,7 +101,7 @@ function registerEndpoints(app, jsonParser) {
 
     app.post('/api/horde/sd-models', jsonParser, async (_, response) => {
         try {
-            const ai_horde = getHordeClient();
+            const ai_horde = await getHordeClient();
             const models = await ai_horde.getModels();
             response.send(models);
         } catch (error) {
@@ -78,7 +118,7 @@ function registerEndpoints(app, jsonParser) {
         }
 
         try {
-            const ai_horde = getHordeClient();
+            const ai_horde = await getHordeClient();
             const user = await ai_horde.findUser({ token: api_key_horde });
             return response.send(user);
         } catch (error) {
@@ -94,7 +134,7 @@ function registerEndpoints(app, jsonParser) {
 
         const MAX_ATTEMPTS = 200;
         const CHECK_INTERVAL = 3000;
-        const PROMPT_THRESHOLD = 1000;
+        const PROMPT_THRESHOLD = 5000;
 
         try {
             const maxLength = PROMPT_THRESHOLD - String(request.body.negative_prompt).length - 5;
@@ -103,10 +143,21 @@ function registerEndpoints(app, jsonParser) {
                 request.body.prompt = String(request.body.prompt).substring(0, maxLength);
             }
 
+            // Sanitize prompt if requested
+            if (request.body.sanitize) {
+                const sanitized = sanitizeHordeImagePrompt(request.body.prompt);
+
+                if (request.body.prompt !== sanitized) {
+                    console.log('Stable Horde prompt was sanitized.');
+                }
+
+                request.body.prompt = sanitized;
+            }
+
             const api_key_horde = readSecret(SECRET_KEYS.HORDE) || ANONYMOUS_KEY;
             console.log('Stable Horde request:', request.body);
 
-            const ai_horde = getHordeClient();
+            const ai_horde = await getHordeClient();
             const generation = await ai_horde.postAsyncImageGenerate(
                 {
                     prompt: `${request.body.prompt} ### ${request.body.negative_prompt}`,
