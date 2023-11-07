@@ -21,13 +21,17 @@ import {
     reloadCurrentChat,
     sendMessageAsUser,
     name1,
+    Generate,
+    this_chid,
+    setCharacterName,
 } from "../script.js";
 import { getMessageTimeStamp } from "./RossAscends-mods.js";
-import { resetSelectedGroup } from "./group-chats.js";
+import { groups, resetSelectedGroup, selected_group } from "./group-chats.js";
 import { getRegexedString, regex_placement } from "./extensions/regex/engine.js";
 import { chat_styles, power_user } from "./power-user.js";
 import { autoSelectPersona } from "./personas.js";
 import { getContext } from "./extensions.js";
+import { hideChatMessage, unhideChatMessage } from "./chats.js";
 export {
     executeSlashCommands,
     registerSlashCommand,
@@ -37,7 +41,7 @@ export {
 class SlashCommandParser {
     constructor() {
         this.commands = {};
-        this.helpStrings = [];
+        this.helpStrings = {};
     }
 
     addCommand(command, callback, aliases, helpString = '', interruptsGeneration = false, purgeFromMessage = true) {
@@ -60,7 +64,7 @@ class SlashCommandParser {
             let aliasesString = `(alias: ${aliases.map(x => `<span class="monospace">/${x}</span>`).join(', ')})`;
             stringBuilder += aliasesString;
         }
-        this.helpStrings.push(stringBuilder);
+        this.helpStrings[command] = stringBuilder;
     }
 
     parse(text) {
@@ -104,7 +108,12 @@ class SlashCommandParser {
     }
 
     getHelpString() {
-        const listItems = this.helpStrings.map(x => `<li>${x}</li>`).join('\n');
+        const listItems = Object
+            .entries(this.helpStrings)
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(x => x[1])
+            .map(x => `<li>${x}</li>`)
+            .join('\n');
         return `<p>Slash commands:</p><ol>${listItems}</ol>
         <small>Slash commands can be batched into a single input by adding a pipe character | at the end, and then writing a new slash command.</small>
         <ul><li><small>Example:</small><code>/cut 1 | /sys Hello, | /continue</code></li>
@@ -116,7 +125,7 @@ const parser = new SlashCommandParser();
 const registerSlashCommand = parser.addCommand.bind(parser);
 const getSlashCommandsHelp = parser.getHelpString.bind(parser);
 
-parser.addCommand('help', helpCommandCallback, ['?'], ' – displays this help message', true, true);
+parser.addCommand('?', helpCommandCallback, ['help'], ' – get help on macros, chat formatting and commands', true, true);
 parser.addCommand('name', setNameCallback, ['persona'], '<span class="monospace">(name)</span> – sets user name and persona avatar (if set)', true, true);
 parser.addCommand('sync', syncCallback, [], ' – syncs user name in user-attributed messages in the current chat', true, true);
 parser.addCommand('lock', bindCallback, ['bind'], ' – locks/unlocks a persona (name and avatar) to the current chat', true, true);
@@ -131,12 +140,199 @@ parser.addCommand('flat', setFlatModeCallback, ['default'], ' – sets the messa
 parser.addCommand('continue', continueChatCallback, ['cont'], ' – continues the last message in the chat', true, true);
 parser.addCommand('go', goToCharacterCallback, ['char'], '<span class="monospace">(name)</span> – opens up a chat with the character by its name', true, true);
 parser.addCommand('sysgen', generateSystemMessage, [], '<span class="monospace">(prompt)</span> – generates a system message using a specified prompt', true, true);
+parser.addCommand('ask', askCharacter, [], '<span class="monospace">(prompt)</span> – asks a specified character card a prompt', true, true);
 parser.addCommand('delname', deleteMessagesByNameCallback, ['cancel'], '<span class="monospace">(name)</span> – deletes all messages attributed to a specified name', true, true);
 parser.addCommand('send', sendUserMessageCallback, ['add'], '<span class="monospace">(text)</span> – adds a user message to the chat log without triggering a generation', true, true);
+parser.addCommand('trigger', triggerGroupMessageCallback, [], '<span class="monospace">(member index or name)</span> – triggers a message generation for the specified group member', true, true);
+parser.addCommand('hide', hideMessageCallback, [], '<span class="monospace">(message index)</span> – hides a chat message from the prompt', true, true);
+parser.addCommand('unhide', unhideMessageCallback, [], '<span class="monospace">(message index)</span> – unhides a message from the prompt', true, true);
 
 const NARRATOR_NAME_KEY = 'narrator_name';
 const NARRATOR_NAME_DEFAULT = 'System';
 export const COMMENT_NAME_DEFAULT = 'Note';
+
+async function askCharacter(_, text) {
+    // Prevent generate recursion
+    $('#send_textarea').val('');
+
+    // Not supported in group chats
+    // TODO: Maybe support group chats?
+    if (selected_group) {
+        toastr.error("Cannot run this command in a group chat!");
+        return;
+    }
+
+    if (!text) {
+        console.warn('WARN: No text provided for /ask command')
+    }
+
+    const parts = text.split('\n');
+    if (parts.length <= 1) {
+        toastr.warning('Both character name and message are required. Separate them with a new line.');
+        return;
+    }
+
+    // Grabbing the message
+    const name = parts.shift().trim();
+    let mesText = parts.join('\n').trim();
+    const prevChId = this_chid;
+
+    // Find the character
+    const chId = characters.findIndex((e) => e.name === name);
+    if (!characters[chId] || chId === -1) {
+        toastr.error("Character not found.");
+        return;
+    }
+
+    // Override character and send a user message
+    setCharacterId(chId);
+
+    // TODO: Maybe look up by filename instead of name
+    const character = characters[chId];
+    let force_avatar, original_avatar;
+
+    if (character && character.avatar !== 'none') {
+        force_avatar = getThumbnailUrl('avatar', character.avatar);
+        original_avatar = character.avatar;
+    }
+    else {
+        force_avatar = default_avatar;
+        original_avatar = default_avatar;
+    }
+
+    setCharacterName(character.name);
+
+    sendMessageAsUser(mesText)
+
+    const restoreCharacter = () => {
+        setCharacterId(prevChId);
+        setCharacterName(characters[prevChId].name);
+
+        // Only force the new avatar if the character name is the same
+        // This skips if an error was fired
+        const lastMessage = chat[chat.length - 1];
+        if (lastMessage && lastMessage?.name === character.name) {
+            lastMessage.force_avatar = force_avatar;
+            lastMessage.original_avatar = original_avatar;
+        }
+
+        // Kill this callback once the event fires
+        eventSource.removeListener(event_types.CHARACTER_MESSAGE_RENDERED, restoreCharacter)
+    }
+
+    // Run generate and restore previous character on error
+    try {
+        toastr.info(`Asking ${character.name} something...`);
+        await Generate('ask_command')
+    } catch {
+        restoreCharacter()
+    }
+
+    // Restore previous character once message renders
+    // Hack for generate
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, restoreCharacter);
+}
+
+async function hideMessageCallback(_, arg) {
+    if (!arg) {
+        console.warn('WARN: No argument provided for /hide command');
+        return;
+    }
+
+    const messageId = Number(arg);
+    const messageBlock = $(`.mes[mesid="${messageId}"]`);
+
+    if (!messageBlock.length) {
+        console.warn(`WARN: No message found with ID ${messageId}`);
+        return;
+    }
+
+    await hideChatMessage(messageId, messageBlock);
+}
+
+async function unhideMessageCallback(_, arg) {
+    if (!arg) {
+        console.warn('WARN: No argument provided for /unhide command');
+        return;
+    }
+
+    const messageId = Number(arg);
+    const messageBlock = $(`.mes[mesid="${messageId}"]`);
+
+    if (!messageBlock.length) {
+        console.warn(`WARN: No message found with ID ${messageId}`);
+        return;
+    }
+
+    await unhideChatMessage(messageId, messageBlock);
+}
+
+async function triggerGroupMessageCallback(_, arg) {
+    if (!selected_group) {
+        toastr.warning("Cannot run this command outside of a group chat.");
+        return;
+    }
+
+    arg = arg?.trim();
+
+    if (!arg) {
+        console.warn('WARN: No argument provided for /trigger command');
+        return;
+    }
+
+    const group = groups.find(x => x.id == selected_group);
+
+    if (!group || !Array.isArray(group.members)) {
+        console.warn('WARN: No group found for selected group ID');
+        return;
+    }
+
+    // Prevent generate recursion
+    $('#send_textarea').val('');
+
+    // Index is 1-based
+    const index = parseInt(arg) - 1;
+    const searchByName = isNaN(index);
+
+    if (searchByName) {
+        const memberNames = group.members.map(x => ({ name: characters.find(y => y.avatar === x)?.name, index: characters.findIndex(y => y.avatar === x) }));
+        const fuse = new Fuse(memberNames, { keys: ['name'] });
+        const result = fuse.search(arg);
+
+        if (!result.length) {
+            console.warn(`WARN: No group member found with name ${arg}`);
+            return;
+        }
+
+        const chid = result[0].item.index;
+
+        if (chid === -1) {
+            console.warn(`WARN: No character found for group member ${arg}`);
+            return;
+        }
+
+        console.log(`Triggering group member ${chid} (${arg}) from search result`, result[0]);
+
+        Generate('normal', { force_chid: chid });
+    } else {
+        const memberAvatar = group.members[index];
+
+        if (memberAvatar === undefined) {
+            console.warn(`WARN: No group member found at index ${index}`);
+            return;
+        }
+
+        const chid = characters.findIndex(x => x.avatar === memberAvatar);
+
+        if (chid === -1) {
+            console.warn(`WARN: No character found for group member ${memberAvatar} at index ${index}`);
+            return;
+        }
+
+        console.log(`Triggering group member ${memberAvatar} at index ${index}`);
+        Generate('normal', { force_chid: chid });
+    }
+}
 
 async function sendUserMessageCallback(_, text) {
     if (!text) {
@@ -443,21 +639,34 @@ async function sendCommentMessage(_, text) {
     await saveChatConditional();
 }
 
+/**
+ * Displays a help message from the slash command
+ * @param {any} _ Unused
+ * @param {string} type Type of help to display
+ */
 function helpCommandCallback(_, type) {
-    switch (type?.trim()) {
+    switch (type?.trim()?.toLowerCase()) {
         case 'slash':
+        case 'commands':
+        case 'slashes':
+        case 'slash commands':
         case '1':
             sendSystemMessage(system_message_types.SLASH_COMMANDS);
             break;
         case 'format':
+        case 'formatting':
+        case 'formats':
+        case 'chat formatting':
         case '2':
             sendSystemMessage(system_message_types.FORMATTING);
             break;
         case 'hotkeys':
+        case 'hotkey':
         case '3':
             sendSystemMessage(system_message_types.HOTKEYS);
             break;
         case 'macros':
+        case 'macro':
         case '4':
             sendSystemMessage(system_message_types.MACROS);
             break;
@@ -485,7 +694,7 @@ function setBackgroundCallback(_, bg) {
     }
 }
 
-function executeSlashCommands(text) {
+async function executeSlashCommands(text) {
     if (!text) {
         return false;
     }
@@ -510,8 +719,12 @@ function executeSlashCommands(text) {
             continue;
         }
 
+        if (result.value && typeof result.value === 'string') {
+            result.value = substituteParams(result.value.trim());
+        }
+
         console.debug('Slash command executing:', result);
-        result.command.callback(result.args, result.value);
+        await result.command.callback(result.args, result.value);
 
         if (result.command.interruptsGeneration) {
             interrupt = true;
@@ -526,3 +739,42 @@ function executeSlashCommands(text) {
 
     return { interrupt, newText };
 }
+
+function setSlashCommandAutocomplete(textarea) {
+    textarea.autocomplete({
+        source: (input, output) => {
+            // Only show for slash commands and if there's no space
+            if (!input.term.startsWith('/') || input.term.includes(' ')) {
+                output([]);
+                return;
+            }
+
+            const slashCommand = input.term.toLowerCase().substring(1); // Remove the slash
+            const result = Object
+                .keys(parser.helpStrings) // Get all slash commands
+                .filter(x => x.startsWith(slashCommand)) // Filter by the input
+                .sort((a, b) => a.localeCompare(b)) // Sort alphabetically
+                // .slice(0, 20) // Limit to 20 results
+                .map(x => ({ label: parser.helpStrings[x], value: `/${x} ` })); // Map to the help string
+
+            output(result); // Return the results
+        },
+        select: (e, u) => {
+            // unfocus the input
+            $(e.target).val(u.item.value);
+        },
+        minLength: 1,
+        position: { my: "left bottom", at: "left top", collision: "none" },
+    });
+
+    textarea.autocomplete("instance")._renderItem = function (ul, item) {
+        const width = $(textarea).innerWidth();
+        const content = $('<div></div>').html(item.label);
+        return $("<li>").width(width).append(content).appendTo(ul);
+    };
+}
+
+jQuery(function () {
+    const textarea = $('#send_textarea');
+    setSlashCommandAutocomplete(textarea);
+})

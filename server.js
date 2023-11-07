@@ -393,6 +393,7 @@ app.post("/generate", jsonParser, async function (request, response_generate) {
             top_a: request.body.top_a,
             top_k: request.body.top_k,
             top_p: request.body.top_p,
+            min_p: request.body.min_p,
             typical: request.body.typical,
             sampler_order: sampler_order,
             singleline: !!request.body.singleline,
@@ -401,6 +402,7 @@ app.post("/generate", jsonParser, async function (request, response_generate) {
             mirostat_eta: request.body.mirostat_eta,
             mirostat_tau: request.body.mirostat_tau,
             grammar: request.body.grammar,
+            sampler_seed: request.body.sampler_seed,
         };
         if (!!request.body.stop_sequence) {
             this_settings['stop_sequence'] = request.body.stop_sequence;
@@ -692,6 +694,7 @@ app.post("/savechat", jsonParser, function (request, response) {
         let chat_data = request.body.chat;
         let jsonlData = chat_data.map(JSON.stringify).join('\n');
         writeFileAtomicSync(`${chatsPath + sanitize(dir_name)}/${sanitize(String(request.body.file_name))}.jsonl`, jsonlData, 'utf8');
+        backupChat(dir_name, jsonlData)
         return response.send({ result: "ok" });
     } catch (error) {
         response.send(error);
@@ -726,7 +729,7 @@ app.post("/getchat", jsonParser, function (request, response) {
         const lines = data.split('\n');
 
         // Iterate through the array of strings and parse each line as JSON
-        const jsonData = lines.map(tryParse).filter(x => x);
+        const jsonData = lines.map((l) => { try { return JSON.parse(l); } catch (_) { } }).filter(x => x);
         return response.send(jsonData);
     } catch (error) {
         console.error(error);
@@ -1535,8 +1538,8 @@ app.post("/delchat", jsonParser, function (request, response) {
 app.post('/renamebackground', jsonParser, function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
-    const oldFileName = path.join('public/backgrounds/', sanitize(request.body.old_bg));
-    const newFileName = path.join('public/backgrounds/', sanitize(request.body.new_bg));
+    const oldFileName = path.join(DIRECTORIES.backgrounds, sanitize(request.body.old_bg));
+    const newFileName = path.join(DIRECTORIES.backgrounds, sanitize(request.body.new_bg));
 
     if (!fs.existsSync(oldFileName)) {
         console.log('BG file not found');
@@ -1801,6 +1804,7 @@ function convertWorldInfoToCharacterBook(name, entries) {
                 probability: entry.probability ?? null,
                 useProbability: entry.useProbability ?? false,
                 depth: entry.depth ?? 4,
+                selectiveLogic: entry.selectiveLogic ?? 0,
             },
         };
 
@@ -1811,15 +1815,18 @@ function convertWorldInfoToCharacterBook(name, entries) {
 }
 
 function readWorldInfoFile(worldInfoName) {
+    const dummyObject = { entries: {} };
+
     if (!worldInfoName) {
-        return { entries: {} };
+        return dummyObject;
     }
 
     const filename = `${worldInfoName}.json`;
     const pathToWorldInfo = path.join(DIRECTORIES.worlds, filename);
 
     if (!fs.existsSync(pathToWorldInfo)) {
-        throw new Error(`World info file ${filename} doesn't exist.`);
+        console.log(`World info file ${filename} doesn't exist.`);
+        return dummyObject;
     }
 
     const worldInfoText = fs.readFileSync(pathToWorldInfo, 'utf8');
@@ -1838,37 +1845,27 @@ function getImages(path) {
         .sort(Intl.Collator().compare);
 }
 
-app.post("/getallchatsofcharacter", jsonParser, function (request, response) {
+app.post("/getallchatsofcharacter", jsonParser, async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
-    var char_dir = (request.body.avatar_url).replace('.png', '')
-    fs.readdir(chatsPath + char_dir, (err, files) => {
-        if (err) {
-            console.log('found error in history loading');
-            console.error(err);
+    const characterDirectory = (request.body.avatar_url).replace('.png', '');
+
+    try {
+        const chatsDirectory = path.join(chatsPath, characterDirectory);
+        const files = fs.readdirSync(chatsDirectory);
+        const jsonFiles = files.filter(file => path.extname(file) === '.jsonl');
+
+        if (jsonFiles.length === 0) {
             response.send({ error: true });
             return;
         }
 
-        // filter for JSON files
-        const jsonFiles = files.filter(file => path.extname(file) === '.jsonl');
-
-        // sort the files by name
-        //jsonFiles.sort().reverse();
-        // print the sorted file names
-        var chatData = {};
-        let ii = jsonFiles.length;	//this is the number of files belonging to the character
-        if (ii !== 0) {
-            //console.log('found '+ii+' chat logs to load');
-            for (let i = jsonFiles.length - 1; i >= 0; i--) {
-                const file = jsonFiles[i];
-                const fileStream = fs.createReadStream(chatsPath + char_dir + '/' + file);
-
-                const fullPathAndFile = chatsPath + char_dir + '/' + file
-                const stats = fs.statSync(fullPathAndFile);
-                const fileSizeInKB = (stats.size / 1024).toFixed(2) + "kb";
-
-                //console.log(fileSizeInKB);
+        const jsonFilesPromise = jsonFiles.map((file) => {
+            return new Promise(async (res) => {
+                const pathToFile = path.join(chatsPath, characterDirectory, file);
+                const fileStream = fs.createReadStream(pathToFile);
+                const stats = fs.statSync(pathToFile);
+                const fileSizeInKB = `${(stats.size / 1024).toFixed(2)}kb`;
 
                 const rl = readline.createInterface({
                     input: fileStream,
@@ -1882,34 +1879,37 @@ app.post("/getallchatsofcharacter", jsonParser, function (request, response) {
                     lastLine = line;
                 });
                 rl.on('close', () => {
-                    ii--;
-                    if (lastLine) {
+                    rl.close();
 
-                        let jsonData = tryParse(lastLine);
-                        if (jsonData && (jsonData.name !== undefined || jsonData.character_name !== undefined)) {
-                            chatData[i] = {};
-                            chatData[i]['file_name'] = file;
-                            chatData[i]['file_size'] = fileSizeInKB;
-                            chatData[i]['chat_items'] = itemCounter - 1;
-                            chatData[i]['mes'] = jsonData['mes'] || '[The chat is empty]';
-                            chatData[i]['last_mes'] = jsonData['send_date'] || Date.now();
+                    if (lastLine) {
+                        const jsonData = tryParse(lastLine);
+                        if (jsonData && (jsonData.name || jsonData.character_name)) {
+                            const chatData = {};
+
+                            chatData['file_name'] = file;
+                            chatData['file_size'] = fileSizeInKB;
+                            chatData['chat_items'] = itemCounter - 1;
+                            chatData['mes'] = jsonData['mes'] || '[The chat is empty]';
+                            chatData['last_mes'] = jsonData['send_date'] || Date.now();
+
+                            res(chatData);
                         } else {
-                            console.log('Found an invalid or corrupted chat file: ' + fullPathAndFile);
+                            console.log('Found an invalid or corrupted chat file:', pathToFile);
+                            res({});
                         }
                     }
-                    if (ii === 0) {
-                        //console.log('ii count went to zero, responding with chatData');
-                        response.send(chatData);
-                    }
-                    //console.log('successfully closing getallchatsofcharacter');
-                    rl.close();
                 });
-            };
-        } else {
-            //console.log('Found No Chats. Exiting Load Routine.');
-            response.send({ error: true });
-        };
-    })
+            });
+        });
+
+        const chatData = await Promise.all(jsonFilesPromise);
+        const validFiles = chatData.filter(i => i.file_name);
+
+        return response.send(validFiles);
+    } catch (error) {
+        console.log(error);
+        return response.send({ error: true });
+    }
 });
 
 function getPngName(file) {
@@ -2576,6 +2576,7 @@ app.post('/creategroup', jsonParser, (request, response) => {
         avatar_url: request.body.avatar_url,
         allow_self_responses: !!request.body.allow_self_responses,
         activation_strategy: request.body.activation_strategy ?? 0,
+        generation_mode: request.body.generation_mode ?? 0,
         disabled_members: request.body.disabled_members ?? [],
         chat_metadata: request.body.chat_metadata ?? {},
         fav: request.body.fav,
@@ -2656,6 +2657,7 @@ app.post('/savegroupchat', jsonParser, (request, response) => {
     let chat_data = request.body.chat;
     let jsonlData = chat_data.map(JSON.stringify).join('\n');
     writeFileAtomicSync(pathToFile, jsonlData, 'utf8');
+    backupChat(String(id), jsonlData);
     return response.send({ ok: true });
 });
 
@@ -2748,7 +2750,7 @@ app.post("/getstatus_openai", jsonParser, async function (request, response_gets
             const data = await response.json();
             response_getstatus_openai.send(data);
 
-            if (request.body.use_openrouter) {
+            if (request.body.use_openrouter && Array.isArray(data?.data)) {
                 let models = [];
 
                 data.data.forEach(model => {
@@ -2763,8 +2765,14 @@ app.post("/getstatus_openai", jsonParser, async function (request, response_gets
 
                 console.log('Available OpenRouter models:', models);
             } else {
-                const modelIds = data?.data?.map(x => x.id)?.sort();
-                console.log('Available OpenAI models:', modelIds);
+                const models = data?.data;
+
+                if (Array.isArray(models)) {
+                    const modelIds = models.filter(x => x && typeof x === 'object').map(x => x.id).sort();
+                    console.log('Available OpenAI models:', modelIds);
+                } else {
+                    console.log('OpenAI endpoint did not return a list of models.')
+                }
             }
         }
         else {
@@ -2773,7 +2781,12 @@ app.post("/getstatus_openai", jsonParser, async function (request, response_gets
         }
     } catch (e) {
         console.error(e);
-        response_getstatus_openai.send({ error: true });
+
+        if (!response_getstatus_openai.headersSent) {
+            response_getstatus_openai.send({ error: true });
+        } else {
+            response_getstatus_openai.end();
+        }
     }
 });
 
@@ -2798,7 +2811,7 @@ app.post("/openai_bias", jsonParser, async function (request, response) {
         }
 
         try {
-            const tokens = tokenizer.encode(entry.text);
+            const tokens = getEntryTokens(entry.text);
 
             for (const token of tokens) {
                 result[token] = entry.value;
@@ -2811,9 +2824,35 @@ app.post("/openai_bias", jsonParser, async function (request, response) {
     // not needed for cached tokenizers
     //tokenizer.free();
     return response.send(result);
+
+    /**
+     * Gets tokenids for a given entry
+     * @param {string} text Entry text
+     * @returns {Uint32Array} Array of token ids
+     */
+    function getEntryTokens(text) {
+        // Get raw token ids from JSON array
+        if (text.trim().startsWith('[') && text.trim().endsWith(']')) {
+            try {
+                const json = JSON.parse(text);
+                if (Array.isArray(json) && json.every(x => typeof x === 'number')) {
+                    return new Uint32Array(json);
+                }
+            } catch {
+                // ignore
+            }
+        }
+
+        // Otherwise, get token ids from tokenizer
+        return tokenizer.encode(text);
+    }
 });
 
 function convertChatMLPrompt(messages) {
+    if (typeof messages === 'string') {
+        return messages;
+    }
+
     const messageStrings = [];
     messages.forEach(m => {
         if (m.role === 'system' && m.name === undefined) {
@@ -3145,9 +3184,9 @@ app.post("/generate_openai", jsonParser, function (request, response_generate_op
         bodyParams['stop'] = request.body.stop;
     }
 
-    const isTextCompletion = Boolean(request.body.model && TEXT_COMPLETION_MODELS.includes(request.body.model));
+    const isTextCompletion = Boolean(request.body.model && TEXT_COMPLETION_MODELS.includes(request.body.model)) || typeof request.body.messages === 'string';
     const textPrompt = isTextCompletion ? convertChatMLPrompt(request.body.messages) : '';
-    const endpointUrl = isTextCompletion ? `${api_url}/completions` : `${api_url}/chat/completions`;
+    const endpointUrl = isTextCompletion && !request.body.use_openrouter ? `${api_url}/completions` : `${api_url}/chat/completions`;
 
     const controller = new AbortController();
     request.socket.removeAllListeners('close');
@@ -3390,6 +3429,9 @@ async function postAsync(url, args) { return fetchJSON(url, { method: 'POST', ti
 
 // ** END **
 
+// OpenAI API
+require('./src/openai').registerEndpoints(app, jsonParser);
+
 // Tokenizers
 require('./src/tokenizers').registerEndpoints(app, jsonParser);
 
@@ -3512,21 +3554,48 @@ if (true === cliArguments.ssl) {
     );
 }
 
-function backupSettings() {
-    const MAX_BACKUPS = 25;
+function generateTimestamp() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
 
-    function generateTimestamp() {
-        const now = new Date();
-        const year = now.getFullYear();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const day = String(now.getDate()).padStart(2, '0');
-        const hours = String(now.getHours()).padStart(2, '0');
-        const minutes = String(now.getMinutes()).padStart(2, '0');
-        const seconds = String(now.getSeconds()).padStart(2, '0');
+    return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
 
-        return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+/**
+ *
+ * @param {string} name
+ * @param {string} chat
+ */
+function backupChat(name, chat) {
+    try {
+        const isBackupDisabled = config.disableChatBackup;
+
+        if (isBackupDisabled) {
+            return;
+        }
+
+        if (!fs.existsSync(DIRECTORIES.backups)) {
+            fs.mkdirSync(DIRECTORIES.backups);
+        }
+
+        // replace non-alphanumeric characters with underscores
+        name = sanitize(name).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+
+        const backupFile = path.join(DIRECTORIES.backups, `chat_${name}_${generateTimestamp()}.json`);
+        writeFileAtomicSync(backupFile, chat, 'utf-8');
+
+        removeOldBackups(`chat_${name}_`);
+    } catch (err) {
+        console.log(`Could not backup chat for ${name}`, err);
     }
+}
 
+function backupSettings() {
     try {
         if (!fs.existsSync(DIRECTORIES.backups)) {
             fs.mkdirSync(DIRECTORIES.backups);
@@ -3535,15 +3604,24 @@ function backupSettings() {
         const backupFile = path.join(DIRECTORIES.backups, `settings_${generateTimestamp()}.json`);
         fs.copyFileSync(SETTINGS_FILE, backupFile);
 
-        let files = fs.readdirSync(DIRECTORIES.backups).filter(f => f.startsWith('settings_'));
-        if (files.length > MAX_BACKUPS) {
-            files = files.map(f => path.join(DIRECTORIES.backups, f));
-            files.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs);
-
-            fs.rmSync(files[0]);
-        }
+        removeOldBackups('settings_');
     } catch (err) {
         console.log('Could not backup settings file', err);
+    }
+}
+
+/**
+ * @param {string} prefix
+ */
+function removeOldBackups(prefix) {
+    const MAX_BACKUPS = 25;
+
+    let files = fs.readdirSync(DIRECTORIES.backups).filter(f => f.startsWith(prefix));
+    if (files.length > MAX_BACKUPS) {
+        files = files.map(f => path.join(DIRECTORIES.backups, f));
+        files.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs);
+
+        fs.rmSync(files[0]);
     }
 }
 

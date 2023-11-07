@@ -1,16 +1,26 @@
-
 <div class="sd_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Stable Diffusion</b>
+            <b>
+                Stable Diffusion
+                <a href="https://docs.sillytavern.app/extras/extensions/stable-diffusion/" class="notes-link" target="_blank">
+                    <span class="note-link-span">?</span>
+                </a>
+            </b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <small><i>Use slash commands or the bottom Paintbrush button to generate images. Type <span class="monospace">/help</span> in chat for more details</i></small>
-            <br>
             <label for="sd_refine_mode" class="checkbox_label" title="Allow to edit prompts manually before sending them to generation API">
                 <input id="sd_refine_mode" type="checkbox" />
                 Edit prompts before generation
+            </label>
+            <label for="sd_interactive_mode" class="checkbox_label" title="Automatically generate images when sending messages like 'send me a picture of cat'.">
+                <input id="sd_interactive_mode" type="checkbox" />
+                Interactive mode
+            </label>
+            <label for="sd_expand" class="checkbox_label" title="Automatically extend prompts using text generation model">
+                <input id="sd_expand" type="checkbox" />
+                Auto-enhance prompts
             </label>
             <label for="sd_source">Source</label>
             <select id="sd_source">
@@ -19,6 +29,7 @@
                 <option value="auto">Stable Diffusion Web UI (AUTOMATIC1111)</option>
                 <option value="vlad">SD.Next (vladmandic)</option>
                 <option value="novel">NovelAI Diffusion</option>
+                <option value="openai">OpenAI (DALL-E)</option>
             </select>
             <div data-sd-source="auto">
                 <label for="sd_auto_url">SD Web UI URL</label>
@@ -86,6 +97,21 @@
                 </div>
                 <i>Hint: Save an API key in the NovelAI API settings to use it here.</i>
             </div>
+            <div data-sd-source="openai">
+                <small>These settings only apply to DALL-E 3</small>
+                <div class="flex-container">
+                    <label for="sd_openai_style">Image Style</label>
+                    <select id="sd_openai_style">
+                        <option value="vivid">Vivid</option>
+                        <option value="natural">Natural</option>
+                    </select>
+                    <label for="sd_openai_quality">Image Quality</label>
+                    <select id="sd_openai_quality">
+                        <option value="standard">Standard</option>
+                        <option value="hd">HD</option>
+                    </select>
+                </div>
+            </div>
             <label for="sd_scale">CFG Scale (<span id="sd_scale_value"></span>)</label>
             <input id="sd_scale" type="range" min="{{scale_min}}" max="{{scale_max}}" step="{{scale_step}}" value="{{scale}}" />
             <label for="sd_steps">Sampling steps (<span id="sd_steps_value"></span>)</label>
@@ -122,15 +148,25 @@
                 <label for="sd_novel_upscale_ratio">Upscale by (<span id="sd_novel_upscale_ratio_value"></span>)</label>
                 <input id="sd_novel_upscale_ratio" type="range" min="{{novel_upscale_ratio_min}}" max="{{novel_upscale_ratio_max}}" step="{{novel_upscale_ratio_step}}" value="{{novel_upscale_ratio}}" />
             </div>
+            <hr>
+            <h4 title="Preset for prompt prefix and negative prompt">
+                Style
+            </h4>
+            <div class="flex-container">
+                <select id="sd_style" class="flex1 text_pole"></select>
+                <div id="sd_save_style" title="Save style" class="menu_button">
+                    <i class="fa-solid fa-save"></i>
+                </div>
+            </div>
             <label for="sd_prompt_prefix">Common prompt prefix</label>
-            <textarea id="sd_prompt_prefix" class="text_pole textarea_compact" rows="3"></textarea>
+            <textarea id="sd_prompt_prefix" class="text_pole textarea_compact" rows="3" placeholder="Use {prompt} to specify where the generated prompt will be inserted"></textarea>
+            <label for="sd_negative_prompt">Negative prompt</label>
+            <textarea id="sd_negative_prompt" class="text_pole textarea_compact" rows="3"></textarea>
             <div id="sd_character_prompt_block">
                 <label for="sd_character_prompt">Character-specific prompt prefix</label>
                 <small>Won't be used in groups.</small>
                 <textarea id="sd_character_prompt" class="text_pole textarea_compact" rows="3" placeholder="Any characteristics that describe the currently selected character. Will be added after a common prefix.&#10;Example: female, green eyes, brown hair, pink shirt"></textarea>
             </div>
-            <label for="sd_negative_prompt">Negative prompt</label>
-            <textarea id="sd_negative_prompt" class="text_pole textarea_compact" rows="3"></textarea>
         </div>
     </div>
     <div class="inline-drawer">
