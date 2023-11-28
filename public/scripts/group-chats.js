@@ -76,6 +76,7 @@ import { FILTER_TYPES, FilterHelper } from './filters.js';
 export {
     selected_group,
     is_group_automode_enabled,
+    hideMutedSprites,
     is_group_generating,
     group_generation_id,
     groups,
@@ -92,6 +93,7 @@ export {
 
 let is_group_generating = false; // Group generation flag
 let is_group_automode_enabled = false;
+let hideMutedSprites = true;
 let groups = [];
 let selected_group = null;
 let group_generation_id = null;
@@ -204,6 +206,69 @@ export async function getGroupChat(groupId) {
 }
 
 /**
+ * Finds the character ID for a group member.
+ * @param {string} arg 1-based member index or character name
+ * @returns {number} 0-based character ID
+ */
+export function findGroupMemberId(arg) {
+    arg = arg?.trim();
+
+    if (!arg) {
+        console.warn('WARN: No argument provided for findGroupMemberId');
+        return;
+    }
+
+    const group = groups.find(x => x.id == selected_group);
+
+    if (!group || !Array.isArray(group.members)) {
+        console.warn('WARN: No group found for selected group ID');
+        return;
+    }
+
+    // Index is 1-based
+    const index = parseInt(arg) - 1;
+    const searchByName = isNaN(index);
+
+    if (searchByName) {
+        const memberNames = group.members.map(x => ({ name: characters.find(y => y.avatar === x)?.name, index: characters.findIndex(y => y.avatar === x) }));
+        const fuse = new Fuse(memberNames, { keys: ['name'] });
+        const result = fuse.search(arg);
+
+        if (!result.length) {
+            console.warn(`WARN: No group member found with name ${arg}`);
+            return;
+        }
+
+        const chid = result[0].item.index;
+
+        if (chid === -1) {
+            console.warn(`WARN: No character found for group member ${arg}`);
+            return;
+        }
+
+        console.log(`Triggering group member ${chid} (${arg}) from search result`, result[0]);
+        return chid;
+    } else {
+        const memberAvatar = group.members[index];
+
+        if (memberAvatar === undefined) {
+            console.warn(`WARN: No group member found at index ${index}`);
+            return;
+        }
+
+        const chid = characters.findIndex(x => x.avatar === memberAvatar);
+
+        if (chid === -1) {
+            console.warn(`WARN: No character found for group member ${memberAvatar} at index ${index}`);
+            return;
+        }
+
+        console.log(`Triggering group member ${memberAvatar} at index ${index}`);
+        return chid;
+    }
+}
+
+/**
  * Gets depth prompts for group members.
  * @param {string} groupId Group ID
  * @param {number} characterId Current Character ID
@@ -256,7 +321,7 @@ export function getGroupDepthPrompts(groupId, characterId) {
  * Combines group members info a single string. Only for groups with generation mode set to APPEND.
  * @param {string} groupId Group ID
  * @param {number} characterId Current Character ID
- * @returns {{description: string, personality: string, scenario: string, mesExample: string}} Group character cards combined
+ * @returns {{description: string, personality: string, scenario: string, mesExamples: string}} Group character cards combined
  */
 export function getGroupCharacterCards(groupId, characterId) {
     console.debug('getGroupCharacterCards entered for group: ', groupId);
@@ -271,7 +336,7 @@ export function getGroupCharacterCards(groupId, characterId) {
     let descriptions = [];
     let personalities = [];
     let scenarios = [];
-    let mesExamples = [];
+    let mesExamplesArray = [];
 
     for (const member of group.members) {
         const index = characters.findIndex(x => x.avatar === member);
@@ -290,15 +355,15 @@ export function getGroupCharacterCards(groupId, characterId) {
         descriptions.push(baseChatReplace(character.description.trim(), name1, character.name));
         personalities.push(baseChatReplace(character.personality.trim(), name1, character.name));
         scenarios.push(baseChatReplace(character.scenario.trim(), name1, character.name));
-        mesExamples.push(baseChatReplace(character.mes_example.trim(), name1, character.name));
+        mesExamplesArray.push(baseChatReplace(character.mes_example.trim(), name1, character.name));
     }
 
     const description = descriptions.join('\n');
     const personality = personalities.join('\n');
     const scenario = scenarioOverride?.trim() || scenarios.join('\n');
-    const mesExample = mesExamples.join('\n');
+    const mesExamples = mesExamplesArray.join('\n');
 
-    return { description, personality, scenario, mesExample };
+    return { description, personality, scenario, mesExamples };
 }
 
 function getFirstCharacterMessage(character) {
@@ -1109,7 +1174,7 @@ function printGroupCandidates() {
 
 function printGroupMembers() {
     const storageKey = 'GroupMembers_PerPage';
-    $(".rm_group_members_pagination").each(function() {
+    $(".rm_group_members_pagination").each(function () {
         $(this).pagination({
             dataSource: getGroupCharacters({ doFilter: false, onlyMembers: true }),
             pageRange: 1,
@@ -1195,6 +1260,15 @@ async function onGroupSelfResponsesClick() {
     }
 }
 
+async function onHideMutedSpritesClick(value) {
+    if (openGroupId) {
+        let _thisGroup = groups.find((x) => x.id == openGroupId);
+        _thisGroup.hideMutedSprites = value;
+        console.log(`_thisGroup.hideMutedSprites = ${_thisGroup.hideMutedSprites}`)
+        await editGroup(openGroupId, false, false);
+    }
+}
+
 function select_group_chats(groupId, skipAnimation) {
     openGroupId = groupId;
     newGroupMembers = [];
@@ -1224,6 +1298,7 @@ function select_group_chats(groupId, skipAnimation) {
     const groupHasMembers = !!$("#rm_group_members").children().length;
     $("#rm_group_submit").prop("disabled", !groupHasMembers);
     $("#rm_group_allow_self_responses").prop("checked", group && group.allow_self_responses);
+    $("#rm_group_hidemutedsprites").prop("checked", group && group.hideMutedSprites);
 
     // bottom buttons
     if (openGroupId) {
@@ -1454,6 +1529,7 @@ async function createGroup() {
             members: members,
             avatar_url: isValidImageUrl(avatar_url) ? avatar_url : default_avatar,
             allow_self_responses: allowSelfResponses,
+            hideMutedSprites: hideMutedSprites,
             activation_strategy: activationStrategy,
             generation_mode: generationMode,
             disabled_members: [],
@@ -1720,6 +1796,12 @@ jQuery(() => {
         const value = $(this).prop("checked");
         is_group_automode_enabled = value;
         eventSource.once(event_types.GENERATION_STOPPED, stopAutoModeGeneration);
+    });
+    $("#rm_group_hidemutedsprites").on("input", function () {
+        const value = $(this).prop("checked");
+        hideMutedSprites = value;
+        onHideMutedSpritesClick(value);
+
     });
     $("#send_textarea").on("keyup", onSendTextareaInput);
     $("#groupCurrentMemberPopoutButton").on('click', doCurMemberListPopout);
