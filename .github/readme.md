@@ -66,7 +66,7 @@ Get in touch with the developers directly:
 * A heavily modified TavernAI 1.2.8 (more than 50% of code rewritten or optimized)
 * Swipes
 * Group chats: multi-bot rooms for characters to talk to you or each other
-* Chat bookmarks / branching (duplicates the dialogue in its current state)
+* Chat checkpoints / branching
 * Advanced KoboldAI / TextGen generation settings with a lot of community-made presets
 * World Info support: create rich lore or save tokens on your character card
 * [OpenRouter](https://openrouter.ai) connection for various APIs (Claude, GPT-4/3.5 and more)
@@ -162,8 +162,10 @@ Installing via ZIP download (discouraged)
 
 ### Linux
 
-  1. Run the `start.sh` script.
-  2. Enjoy.
+  1. Ensure you have Node.js v18 or higher (the latest [LTS version](https://nodejs.org/en/download/) is recommended) installed by running `node -v`.
+Alternatively, use the [Node Version Manager](https://github.com/nvm-sh/nvm#installing-and-updating) script to quickly and easily manage your Node installations.
+  2. Run the `start.sh` script.
+  3. Enjoy.
 
 ## API keys management
 

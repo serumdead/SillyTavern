@@ -316,6 +316,11 @@ table.responsiveTable {
     padding: 1em;
 }
 
+.mes_text img:not(.mes_img) {
+    max-width: 100%;
+    max-height: var(--doc-height);
+}
+
 .mes .mes_timer,
 .mes .mesIDDisplay,
 .mes .tokenCounterDisplay {
@@ -631,6 +636,7 @@ hr {
     display: none;
     order: 2;
     padding-right: 2px;
+    place-self: center;
 }
 
 #options_button {
@@ -1145,7 +1151,6 @@ input[type="file"] {
     display: block;
     cursor: pointer;
     text-align: center;
-    padding-right: 20px;
     margin-top: 0;
     filter: grayscale(1) brightness(75%);
     -webkit-transition: all 0.5s ease-in-out;
@@ -1251,10 +1256,6 @@ input[type="file"] {
 
 .bulk_select_checkbox {
     align-self: center;
-}
-
-#rm_print_characters_block.bulk_select .wide100pLess70px {
-    width: calc(100% - 85px);
 }
 
 #rm_print_characters_block .empty_block {
@@ -1449,9 +1450,7 @@ select option:not(:checked) {
     display: block;
 }
 
-#api_button:hover,
-#api_button_novel:hover,
-#api_button_textgenerationwebui:hover {
+.menu_button.api_button:hover {
     background-color: var(--active);
 }
 
@@ -1546,6 +1545,7 @@ input[type=search]:focus::-webkit-search-cancel-button {
     padding: 5px;
     border-radius: 10px;
     cursor: pointer;
+    margin-bottom: 1px;
 }
 
 /*applies to char list and mes_text char display name*/
@@ -1966,6 +1966,7 @@ grammarly-extension {
 .wide_dialogue_popup {
     aspect-ratio: 1 / 1;
     width: unset !important;
+    min-width: var(--sheldWidth);
 }
 
 #bulk_tag_popup_holder,
@@ -2510,7 +2511,7 @@ input[type="range"]::-webkit-slider-thumb {
     cursor: pointer;
     transition: 0.3s ease-in-out;
     filter: drop-shadow(0px 0px 2px black);
-    opacity: 0.2;
+    opacity: 0.3;
 }
 
 .mes_buttons .mes_edit:hover,
@@ -2633,7 +2634,7 @@ input[type="range"]::-webkit-slider-thumb {
     max-height: calc(100vh - 84px);
     max-height: calc(100svh - 84px);
     position: absolute;
-    z-index: 3002;
+    z-index: 3000;
     margin-left: auto;
     margin-right: auto;
     left: 0;
@@ -3585,10 +3586,18 @@ a {
 }
 
 .zoomed_avatar {
+    /* Max height with 2/3 aspect ratio */
+    --maxWidth: calc(90vh * 0.666);
+    /* Left gap between the left corner and chat */
+    --leftGapWidth: calc((100vw - var(--sheldWidth)) / 2);
+    /* Left position of the avatar (half of the gap minus half of the avatar width) */
+    --leftPosition: max(0px, calc((var(--leftGapWidth) - var(--maxWidth)) / 2));
     aspect-ratio: 2 / 3;
     padding: 0;
     border: 0;
     background-color: transparent;
+    max-width: var(--maxWidth);
+    left: var(--leftPosition);
 }
 
 .zoomed_avatar img {
