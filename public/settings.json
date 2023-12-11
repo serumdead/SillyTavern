@@ -1,6 +1,6 @@
 {
     "firstRun": false,
-    "currentVersion": "1.10.10",
+    "currentVersion": "1.11.0",
     "username": "Jack",
     "active_character": "Aria1.png",
     "active_group": null,
@@ -81,6 +81,7 @@
             2,
             5
         ],
+        "n": 1,
         "streaming_url": "ws://127.0.0.1:5005/api/v1/stream",
         "rep_pen_size": 0
     },
@@ -192,7 +193,8 @@
             "preset": "Default",
             "story_string": "{{#if system}}{{system}}\n{{/if}}{{#if description}}{{description}}\n{{/if}}{{#if personality}}{{char}}'s personality: {{personality}}\n{{/if}}{{#if scenario}}Scenario: {{scenario}}\n{{/if}}{{#if persona}}{{persona}}\n{{/if}}",
             "chat_start": "***",
-            "example_separator": "***"
+            "example_separator": "***",
+            "use_stop_strings": false
         },
         "personas": {
             "1686734292393.png": "Jennifer",
@@ -245,6 +247,7 @@
         "bogus_folders": false,
         "aux_field": "character_version",
         "restore_user_input": true,
+        "reduced_motion": false,
         "multigen": false,
         "multigen_first_chunk": 50,
         "multigen_next_chunks": 30,
@@ -371,7 +374,7 @@
                 "10": "Provide an exhaustive comma-separated list of tags describing the appearance of the character on this image in great detail. Start with \"close-up portrait\"."
             },
             "character_prompts": {},
-            "source": "auto",
+            "source": "horde",
             "refine_mode": false,
             "auto_url": "http://localhost:7860",
             "auto_auth": "",
@@ -768,8 +771,8 @@
         "top_p_openai": 0.93,
         "top_k_openai": 0,
         "stream_openai": true,
-        "openai_max_context": 19294,
-        "openai_max_tokens": 350,
+        "openai_max_context": "19711",
+        "openai_max_tokens": 1000,
         "wrap_in_quotes": false,
         "names_in_completion": false,
         "prompts": [
@@ -949,7 +952,6 @@
         "openrouter_sort_models": "alphabetically",
         "jailbreak_system": false,
         "reverse_proxy": "https://fiz2-cloudy.hf.space/proxy/aws/claude",
-        "legacy_streaming": true,
         "chat_completion_source": "openai",
         "max_context_unlocked": false,
         "api_url_scale": "",
@@ -961,6 +963,7 @@
         "use_alt_scale": false,
         "squash_system_messages": false,
         "image_inlining": false,
-        "bypass_status_check": false
+        "bypass_status_check": false,
+        "seed": -1
     }
 }
