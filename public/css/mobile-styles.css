@@ -1,5 +1,9 @@
 /*will apply to anything 1000px or less. this catches ipads, horizontal phones, and vertical phones)*/
 @media screen and (max-width: 1000px) {
+    #send_form.compact #leftSendForm, #send_form.compact #rightSendForm {
+        flex-wrap: nowrap;
+        width: unset;
+    }
 
     .bg_button {
         font-size: 15px;
@@ -92,6 +96,11 @@
         left: 0;
         top: 5px;
         border: 1px solid var(--SmartThemeBorderColor);
+    }
+
+    .drawer-content .floating_panel_maximize,
+    .drawer-content .inline-drawer-maximize {
+        display: none;
     }
 
     #select_chat_popup {
@@ -196,7 +205,9 @@
     #right-nav-panel,
     #left-nav-panel,
     #floatingPrompt,
-    #cfgConfig {
+    #cfgConfig,
+    #logprobsViewer,
+    #movingDivs > div {
         height: calc(100vh - 45px);
         height: calc(100svh - 45px);
         min-width: 100% !important;
@@ -213,7 +224,9 @@
     }
 
     #floatingPrompt,
-    #cfgConfig {
+    #cfgConfig,
+    #logprobsViewer,
+    #movingDivs > div {
         height: min-content;
     }
 
@@ -384,10 +397,6 @@
         width: 1.15em;
         flex-wrap: wrap;
         height: unset;
-    }
-
-    #extensionsMenuButton {
-        order: 1;
     }
 }
 

@@ -1,5 +1,6 @@
 // Move chat functions here from script.js (eventually)
 
+import css from '../lib/css-parser.mjs';
 import {
     addCopyToCodeBlocks,
     appendMediaToMessage,
@@ -339,6 +340,80 @@ function embedMessageFile(messageId, messageBlock) {
         appendMediaToMessage(message, messageBlock);
         saveChatDebounced();
     }
+}
+
+/**
+ * Appends file content to the message text.
+ * @param {object} message Message object
+ * @param {string} messageText Message text
+ * @returns {Promise<string>} Message text with file content appended.
+ */
+export async function appendFileContent(message, messageText) {
+    if (message.extra?.file) {
+        const fileText = message.extra.file.text || (await getFileAttachment(message.extra.file.url));
+
+        if (fileText) {
+            const fileWrapped = `\`\`\`\n${fileText}\n\`\`\`\n\n`;
+            message.extra.fileLength = fileWrapped.length;
+            messageText = fileWrapped + messageText;
+        }
+    }
+    return messageText;
+}
+
+/**
+ * Replaces style tags in the message text with custom tags with encoded content.
+ * @param {string} text
+ * @returns {string} Encoded message text
+ * @copyright https://github.com/kwaroran/risuAI
+ */
+export function encodeStyleTags(text) {
+    const styleRegex = /<style>(.+?)<\/style>/gms;
+    return text.replaceAll(styleRegex, (_, match) => {
+        return `<custom-style>${escape(match)}</custom-style>`;
+    });
+}
+
+/**
+ * Sanitizes custom style tags in the message text to prevent DOM pollution.
+ * @param {string} text Message text
+ * @returns {string} Sanitized message text
+ * @copyright https://github.com/kwaroran/risuAI
+ */
+export function decodeStyleTags(text) {
+    const styleDecodeRegex = /<custom-style>(.+?)<\/custom-style>/gms;
+
+    return text.replaceAll(styleDecodeRegex, (_, style) => {
+        try {
+            const ast = css.parse(unescape(style));
+            const rules = ast?.stylesheet?.rules;
+            if (rules) {
+                for (const rule of rules) {
+
+                    if (rule.type === 'rule') {
+                        if (rule.selectors) {
+                            for (let i = 0; i < rule.selectors.length; i++) {
+                                let selector = rule.selectors[i];
+                                if (selector) {
+                                    let selectors = (selector.split(' ') ?? []).map((v) => {
+                                        if (v.startsWith('.')) {
+                                            return '.custom-' + v.substring(1);
+                                        }
+                                        return v;
+                                    }).join(' ');
+
+                                    rule.selectors[i] = '.mes_text ' + selectors;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return `<style>${css.stringify(ast)}</style>`;
+        } catch (error) {
+            return `CSS ERROR: ${error}`;
+        }
+    });
 }
 
 jQuery(function () {

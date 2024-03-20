@@ -36,8 +36,9 @@ import {
 import { registerSlashCommand } from './slash-commands.js';
 import { tags } from './tags.js';
 import { tokenizers } from './tokenizers.js';
+import { BIAS_CACHE } from './logit-bias.js';
 
-import { countOccurrences, debounce, delay, isOdd, resetScrollHeight, shuffle, sortMoments, stringToRange, timestampToMoment } from './utils.js';
+import { countOccurrences, debounce, delay, download, getFileText, isOdd, resetScrollHeight, shuffle, sortMoments, stringToRange, timestampToMoment } from './utils.js';
 
 export {
     loadPowerUserSettings,
@@ -57,7 +58,7 @@ const MAX_CONTEXT_UNLOCKED = 200 * 1024;
 const MAX_RESPONSE_UNLOCKED = 16 * 1024;
 const unlockedMaxContextStep = 512;
 const maxContextMin = 512;
-const maxContextStep = 256;
+const maxContextStep = 64;
 
 const defaultStoryString = '{{#if system}}{{system}}\n{{/if}}{{#if description}}{{description}}\n{{/if}}{{#if personality}}{{char}}\'s personality: {{personality}}\n{{/if}}{{#if scenario}}Scenario: {{scenario}}\n{{/if}}{{#if persona}}{{persona}}\n{{/if}}';
 const defaultExampleSeparator = '***';
@@ -114,6 +115,7 @@ let power_user = {
     },
     markdown_escape_strings: '',
     chat_truncation: 100,
+    streaming_fps: 30,
 
     ui_mode: ui_mode.POWER,
     fast_ui_mode: true,
@@ -136,6 +138,7 @@ let power_user = {
 
     main_text_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeBodyColor').trim()}`,
     italics_text_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeEmColor').trim()}`,
+    underline_text_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeUnderlineColor').trim()}`,
     quote_text_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeQuoteColor').trim()}`,
     blur_tint_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeBlurTintColor').trim()}`,
     chat_tint_color: `${getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeChatTintColor').trim()}`,
@@ -162,6 +165,7 @@ let power_user = {
     auto_fix_generated_markdown: true,
     send_on_enter: send_on_enter_options.AUTO,
     console_log_prompts: false,
+    request_token_probabilities: false,
     render_formulas: false,
     allow_name1_display: false,
     allow_name2_display: false,
@@ -203,6 +207,7 @@ let power_user = {
         names: false,
         names_force_groups: true,
         activation_regex: '',
+        bind_to_context: false,
     },
 
     default_context: 'Default',
@@ -212,6 +217,7 @@ let power_user = {
         chat_start: defaultChatStart,
         example_separator: defaultExampleSeparator,
         use_stop_strings: true,
+        allow_jailbreak: false,
     },
 
     personas: {},
@@ -221,6 +227,7 @@ let power_user = {
     persona_description: '',
     persona_description_position: persona_description_positions.IN_PROMPT,
     persona_show_notifications: true,
+    persona_sort_order: 'asc',
 
     custom_stopping_strings: '',
     custom_stopping_strings_macro: true,
@@ -228,9 +235,14 @@ let power_user = {
     encode_tags: false,
     servers: [],
     bogus_folders: false,
+    show_tag_filters: false,
     aux_field: 'character_version',
     restore_user_input: true,
     reduced_motion: false,
+    compact_input_area: true,
+    auto_connect: false,
+    auto_load_chat: false,
+    forbid_external_images: false,
 };
 
 let themes = [];
@@ -246,6 +258,7 @@ const storage_keys = {
 
     main_text_color: 'TavernAI_main_text_color',
     italics_text_color: 'TavernAI_italics_text_color',
+    underline_text_color: 'TavernAI_underline_text_color',
     quote_text_color: 'TavernAI_quote_text_color',
     blur_tint_color: 'TavernAI_blur_tint_color',
     chat_tint_color: 'TavernAI_chat_tint_color',
@@ -272,6 +285,9 @@ const storage_keys = {
     enableZenSliders: 'enableZenSliders',
     enableLabMode: 'enableLabMode',
     reduced_motion: 'reduced_motion',
+    compact_input_area: 'compact_input_area',
+    auto_connect_legacy: 'AutoConnectEnabled',
+    auto_load_chat_legacy: 'AutoLoadChatEnabled',
 };
 
 const contextControls = [
@@ -280,6 +296,7 @@ const contextControls = [
     { id: 'context_example_separator', property: 'example_separator', isCheckbox: false, isGlobalSetting: false },
     { id: 'context_chat_start', property: 'chat_start', isCheckbox: false, isGlobalSetting: false },
     { id: 'context_use_stop_strings', property: 'use_stop_strings', isCheckbox: true, isGlobalSetting: false, defaultValue: false },
+    { id: 'context_allow_jailbreak', property: 'allow_jailbreak', isCheckbox: true, isGlobalSetting: false, defaultValue: false },
 
     // Existing power user settings
     { id: 'always-force-name2-checkbox', property: 'always_force_name2', isCheckbox: true, isGlobalSetting: true, defaultValue: true },
@@ -447,6 +464,14 @@ function switchReducedMotion() {
     const overrideDuration = power_user.reduced_motion ? 0 : ANIMATION_DURATION_DEFAULT;
     setAnimationDuration(overrideDuration);
     $('#reduced_motion').prop('checked', power_user.reduced_motion);
+    $('body').toggleClass('reduced-motion', power_user.reduced_motion);
+}
+
+function switchCompactInputArea() {
+    const value = localStorage.getItem(storage_keys.compact_input_area);
+    power_user.compact_input_area = value === null ? true : value == 'true';
+    $('#send_form').toggleClass('compact', power_user.compact_input_area);
+    $('#compact_input_area').prop('checked', power_user.compact_input_area);
 }
 
 var originalSliderValues = [];
@@ -483,6 +508,11 @@ async function switchLabMode() {
         $('#labModeWarning').removeClass('displayNone');
         //$("#advanced-ai-config-block input[type='range']").hide()
 
+        $('#amount_gen').attr('min', '1')
+            .attr('max', '99999')
+            .attr('step', '1');
+
+
     } else {
         //re apply the original sliders values to each input
         originalSliderValues.forEach(function (slider) {
@@ -494,6 +524,10 @@ async function switchLabMode() {
         });
         $('#advanced-ai-config-block input[type=\'range\']').show();
         $('#labModeWarning').addClass('displayNone');
+
+        $('#amount_gen').attr('min', '16')
+            .attr('max', '2048')
+            .attr('step', '1');
     }
 }
 
@@ -508,7 +542,7 @@ async function switchZenSliders() {
         $('#clickSlidersTips').hide();
         $('#pro-settings-block input[type=\'number\']').hide();
         //hide number inputs that are not 'seed' inputs
-        $(`#textgenerationwebui_api-settings :input[type='number']:not([id^='seed']),
+        $(`#textgenerationwebui_api-settings :input[type='number']:not([id^='seed']):not([id^='n_']),
             #kobold_api-settings :input[type='number']:not([id^='seed'])`).hide();
         //hide original sliders
         $(`#textgenerationwebui_api-settings input[type='range'],
@@ -546,7 +580,7 @@ async function CreateZenSliders(elmnt) {
     var sliderMax = Number(originalSlider.attr('max'));
     var sliderValue = originalSlider.val();
     var sliderRange = sliderMax - sliderMin;
-    var numSteps = 10;
+    var numSteps = 20;
     var decimals = 2;
     var offVal, allVal;
     var stepScale;
@@ -589,8 +623,16 @@ async function CreateZenSliders(elmnt) {
         sliderID == 'min_length_textgenerationwebui' ||
         sliderID == 'top_k' ||
         sliderID == 'mirostat_mode_kobold' ||
-        sliderID == 'rep_pen_range') {
+        sliderID == 'rep_pen_range' ||
+        sliderID == 'max_tokens_second_textgenerationwebui') {
         decimals = 0;
+    }
+    if (sliderID == 'min_temp_textgenerationwebui' ||
+        sliderID == 'max_temp_textgenerationwebui' ||
+        sliderID == 'dynatemp_exponent_textgenerationwebui' ||
+        sliderID == 'smoothing_curve_textgenerationwebui' ||
+        sliderID == 'smoothing_factor_textgenerationwebui') {
+        decimals = 2;
     }
     if (sliderID == 'eta_cutoff_textgenerationwebui' ||
         sliderID == 'epsilon_cutoff_textgenerationwebui') {
@@ -621,7 +663,9 @@ async function CreateZenSliders(elmnt) {
     }
     if (sliderID == 'mirostat_eta_textgenerationwebui' ||
         sliderID == 'penalty_alpha_textgenerationwebui' ||
-        sliderID == 'length_penalty_textgenerationwebui') {
+        sliderID == 'length_penalty_textgenerationwebui' ||
+        sliderID == 'min_temp_textgenerationwebui' ||
+        sliderID == 'max_temp_textgenerationwebui') {
         numSteps = 50;
     }
     //customize off values
@@ -646,6 +690,8 @@ async function CreateZenSliders(elmnt) {
         sliderID == 'top_k_textgenerationwebui' ||
         sliderID == 'top_k' ||
         sliderID == 'rep_pen_slope' ||
+        sliderID == 'smoothing_factor_textgenerationwebui' ||
+        sliderID == 'smoothing_curve_textgenerationwebui' ||
         sliderID == 'min_length_textgenerationwebui') {
         offVal = 0;
     }
@@ -660,12 +706,18 @@ async function CreateZenSliders(elmnt) {
         sliderID == 'encoder_rep_pen_textgenerationwebui' ||
         sliderID == 'temp_textgenerationwebui' ||
         sliderID == 'temp' ||
+        sliderID == 'min_temp_textgenerationwebui' ||
+        sliderID == 'max_temp_textgenerationwebui' ||
+        sliderID == 'dynatemp_exponent_textgenerationwebui' ||
         sliderID == 'guidance_scale_textgenerationwebui' ||
         sliderID == 'guidance_scale') {
         offVal = 1;
     }
     if (sliderID == 'guidance_scale_textgenerationwebui') {
         numSteps = 78;
+    }
+    if (sliderID == 'top_k_textgenerationwebui') {
+        sliderMin = 0;
     }
     //customize amt gen steps
     if (sliderID !== 'amount_gen' && sliderID !== 'rep_pen_range_textgenerationwebui') {
@@ -871,31 +923,31 @@ function switchWaifuMode() {
 
 function switchSpoilerMode() {
     if (power_user.spoiler_free_mode) {
-        $('#description_div').hide();
-        $('#description_textarea').hide();
-        $('#firstmessage_textarea').hide();
-        $('#first_message_div').hide();
-        $('#spoiler_free_desc').show();
+        $('#descriptionWrapper').hide();
+        $('#firstMessageWrapper').hide();
+        $('#spoiler_free_desc').addClass('flex1');
+        $('#creator_notes_spoiler').show();
     }
     else {
-        $('#description_div').show();
-        $('#description_textarea').show();
-        $('#firstmessage_textarea').show();
-        $('#first_message_div').show();
-        $('#spoiler_free_desc').hide();
+        $('#descriptionWrapper').show();
+        $('#firstMessageWrapper').show();
+        $('#spoiler_free_desc').removeClass('flex1');
+        $('#creator_notes_spoiler').hide();
     }
 }
 
 function peekSpoilerMode() {
-    $('#description_div').toggle();
-    $('#description_textarea').toggle();
-    $('#firstmessage_textarea').toggle();
-    $('#first_message_div').toggle();
-
+    $('#descriptionWrapper').toggle();
+    $('#firstMessageWrapper').toggle();
+    $('#creator_notes_spoiler').toggle();
+    $('#spoiler_free_desc').toggleClass('flex1');
 }
 
 
 function switchMovingUI() {
+    $('.drawer-content.maximized').each(function () {
+        $(this).find('.inline-drawer-maximize').trigger('click');
+    });
     const movingUI = localStorage.getItem(storage_keys.movingUI);
     power_user.movingUI = movingUI === null ? false : movingUI == 'true';
     $('body').toggleClass('movingUI', power_user.movingUI);
@@ -996,6 +1048,9 @@ async function applyThemeColor(type) {
     if (type === 'italics') {
         document.documentElement.style.setProperty('--SmartThemeEmColor', power_user.italics_text_color);
     }
+    if (type === 'underline') {
+        document.documentElement.style.setProperty('--SmartThemeUnderlineColor', power_user.underline_text_color);
+    }
     if (type === 'quote') {
         document.documentElement.style.setProperty('--SmartThemeQuoteColor', power_user.quote_text_color);
     }
@@ -1024,13 +1079,6 @@ async function applyThemeColor(type) {
 
 async function applyCustomCSS() {
     power_user.custom_css = String(localStorage.getItem(storage_keys.custom_css) ?? '');
-
-    if (power_user.custom_css.includes('@import')) {
-        var removeImport = /@import[^;]+;/gm;
-        power_user.custom_css = power_user.custom_css.replace(removeImport, '');
-        localStorage.setItem(storage_keys.custom_css, power_user.custom_css);
-        toastr.warning('@import not allowed in Custom CSS. @import lines removed.');
-    }
 
     $('#customCSS').val(power_user.custom_css);
     var styleId = 'custom-style';
@@ -1088,6 +1136,7 @@ async function applyTheme(name) {
     const themeProperties = [
         { key: 'main_text_color', selector: '#main-text-color-picker', type: 'main' },
         { key: 'italics_text_color', selector: '#italics-color-picker', type: 'italics' },
+        { key: 'underline_text_color', selector: '#underline-color-picker', type: 'underline' },
         { key: 'quote_text_color', selector: '#quote-color-picker', type: 'quote' },
         { key: 'blur_tint_color', selector: '#blur-tint-color-picker', type: 'blurTint' },
         { key: 'chat_tint_color', selector: '#chat-tint-color-picker', type: 'chatTint' },
@@ -1245,6 +1294,15 @@ async function applyTheme(name) {
             action: async () => {
                 localStorage.setItem(storage_keys.reduced_motion, String(power_user.reduced_motion));
                 $('#reduced_motion').prop('checked', power_user.reduced_motion);
+                switchReducedMotion();
+            },
+        },
+        {
+            key: 'compact_input_area',
+            action: async () => {
+                localStorage.setItem(storage_keys.compact_input_area, String(power_user.compact_input_area));
+                $('#compact_input_area').prop('checked', power_user.compact_input_area);
+                switchCompactInputArea();
             },
         },
     ];
@@ -1356,6 +1414,19 @@ function loadPowerUserSettings(settings, data) {
     const expandMessageActions = localStorage.getItem(storage_keys.expand_message_actions);
     const enableZenSliders = localStorage.getItem(storage_keys.enableZenSliders);
     const enableLabMode = localStorage.getItem(storage_keys.enableLabMode);
+    const autoLoadChat = localStorage.getItem(storage_keys.auto_load_chat_legacy);
+    const autoConnect = localStorage.getItem(storage_keys.auto_connect_legacy);
+
+    if (autoLoadChat) {
+        power_user.auto_load_chat = autoLoadChat === 'true';
+        localStorage.removeItem(storage_keys.auto_load_chat_legacy);
+    }
+
+    if (autoConnect) {
+        power_user.auto_connect = autoConnect === 'true';
+        localStorage.removeItem(storage_keys.auto_connect_legacy);
+    }
+
     power_user.fast_ui_mode = fastUi === null ? true : fastUi == 'true';
     power_user.movingUI = movingUI === null ? false : movingUI == 'true';
     power_user.noShadows = noShadows === null ? false : noShadows == 'true';
@@ -1409,6 +1480,7 @@ function loadPowerUserSettings(settings, data) {
     $(`#example_messages_behavior option[value="${getExampleMessagesBehavior()}"]`).prop('selected', true);
 
     $('#console_log_prompts').prop('checked', power_user.console_log_prompts);
+    $('#request_token_probabilities').prop('checked', power_user.request_token_probabilities);
     $('#auto_fix_generated_markdown').prop('checked', power_user.auto_fix_generated_markdown);
     $('#auto_scroll_chat_to_bottom').prop('checked', power_user.auto_scroll_chat_to_bottom);
     $('#bogus_folders').prop('checked', power_user.bogus_folders);
@@ -1460,6 +1532,9 @@ function loadPowerUserSettings(settings, data) {
     $('#chat_truncation').val(power_user.chat_truncation);
     $('#chat_truncation_counter').val(power_user.chat_truncation);
 
+    $('#streaming_fps').val(power_user.streaming_fps);
+    $('#streaming_fps_counter').val(power_user.streaming_fps);
+
     $('#font_scale').val(power_user.font_scale);
     $('#font_scale_counter').val(power_user.font_scale);
 
@@ -1471,6 +1546,7 @@ function loadPowerUserSettings(settings, data) {
 
     $('#main-text-color-picker').attr('color', power_user.main_text_color);
     $('#italics-color-picker').attr('color', power_user.italics_text_color);
+    $('#underline-color-picker').attr('color', power_user.underline_text_color);
     $('#quote-color-picker').attr('color', power_user.quote_text_color);
     $('#blur-tint-color-picker').attr('color', power_user.blur_tint_color);
     $('#chat-tint-color-picker').attr('color', power_user.chat_tint_color);
@@ -1480,6 +1556,9 @@ function loadPowerUserSettings(settings, data) {
     $('#border-color-picker').attr('color', power_user.border_color);
     $('#ui_mode_select').val(power_user.ui_mode).find(`option[value="${power_user.ui_mode}"]`).attr('selected', true);
     $('#reduced_motion').prop('checked', power_user.reduced_motion);
+    $('#auto-connect-checkbox').prop('checked', power_user.auto_connect);
+    $('#auto-load-chat-checkbox').prop('checked', power_user.auto_load_chat);
+    $('#forbid_external_images').prop('checked', power_user.forbid_external_images);
 
     for (const theme of themes) {
         const option = document.createElement('option');
@@ -1500,6 +1579,7 @@ function loadPowerUserSettings(settings, data) {
 
     $(`#character_sort_order option[data-order="${power_user.sort_order}"][data-field="${power_user.sort_field}"]`).prop('selected', true);
     switchReducedMotion();
+    switchCompactInputArea();
     reloadMarkdownProcessor(power_user.render_formulas);
     loadInstructMode(data);
     loadContextSettings();
@@ -1526,7 +1606,7 @@ async function loadCharListState() {
 }
 
 function loadMovingUIState() {
-    if (isMobile() === false
+    if (!isMobile()
         && power_user.movingUIState
         && power_user.movingUI === true) {
         console.debug('loading movingUI state');
@@ -1694,17 +1774,18 @@ function loadContextSettings() {
             }
         });
 
-        // Select matching instruct preset
-        for (const instruct_preset of instruct_presets) {
-            // If instruct preset matches the context template
-            if (instruct_preset.name === name) {
-                selectInstructPreset(instruct_preset.name);
-                break;
+        if (power_user.instruct.bind_to_context) {
+            // Select matching instruct preset
+            for (const instruct_preset of instruct_presets) {
+                // If instruct preset matches the context template
+                if (instruct_preset.name === name) {
+                    selectInstructPreset(instruct_preset.name);
+                    break;
+                }
             }
         }
 
         highlightDefaultContext();
-
         saveSettingsDebounced();
     });
 
@@ -1773,6 +1854,23 @@ export function fuzzySearchWorldInfo(data, searchValue) {
     return results.map(x => x.item?.uid);
 }
 
+export function fuzzySearchPersonas(data, searchValue) {
+    data = data.map(x => ({ key: x, description: power_user.persona_descriptions[x]?.description ?? '', name: power_user.personas[x] ?? '' }));
+    const fuse = new Fuse(data, {
+        keys: [
+            { name: 'name', weight: 4 },
+            { name: 'description', weight: 1 },
+        ],
+        includeScore: true,
+        ignoreLocation: true,
+        threshold: 0.2,
+    });
+
+    const results = fuse.search(searchValue);
+    console.debug('Personas fuzzy search results for ' + searchValue, results);
+    return results.map(x => x.item?.key);
+}
+
 export function fuzzySearchTags(searchValue) {
     const fuse = new Fuse(tags, {
         keys: [
@@ -1822,8 +1920,8 @@ export function renderStoryString(params) {
         // substitute {{macro}} params that are not defined in the story string
         output = substituteParams(output, params.user, params.char);
 
-        // remove leading whitespace
-        output = output.trimStart();
+        // remove leading newlines
+        output = output.replace(/^\n+/, '');
 
         // add a newline to the end of the story string if it doesn't have one
         if (output.length > 0 && !output.endsWith('\n')) {
@@ -1889,11 +1987,113 @@ function sortEntitiesList(entities) {
     });
 }
 
-async function saveTheme() {
-    const name = await callPopup('Enter a theme preset name:', 'input');
+/**
+ * Updates the current UI theme file.
+ */
+async function updateTheme() {
+    await saveTheme(power_user.theme);
+    toastr.success('Theme saved.');
+}
 
-    if (!name) {
+async function deleteTheme() {
+    const themeName = power_user.theme;
+
+    if (!themeName) {
+        toastr.info('No theme selected.');
         return;
+    }
+
+    const confirm = await callPopup(`Are you sure you want to delete the theme "${themeName}"?`, 'confirm', '', { okButton: 'Yes' });
+
+    if (!confirm) {
+        return;
+    }
+
+    const response = await fetch('/api/themes/delete', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ name: themeName }),
+    });
+
+    if (!response.ok) {
+        toastr.error('Failed to delete theme. Check the console for more information.');
+        return;
+    }
+
+    const themeIndex = themes.findIndex(x => x.name == themeName);
+
+    if (themeIndex !== -1) {
+        themes.splice(themeIndex, 1);
+        $(`#themes option[value="${themeName}"]`).remove();
+        power_user.theme = themes[0]?.name;
+        saveSettingsDebounced();
+        if (power_user.theme) {
+            await applyTheme(power_user.theme);
+        }
+        toastr.success('Theme deleted.');
+    }
+}
+
+/**
+ * Exports the current theme to a file.
+ */
+async function exportTheme() {
+    const themeFile = await saveTheme(power_user.theme);
+    const fileName = `${themeFile.name}.json`;
+    download(JSON.stringify(themeFile, null, 4), fileName, 'application/json');
+}
+
+/**
+ * Imports a theme from a file.
+ * @param {File} file File to import.
+ * @returns {Promise<void>} A promise that resolves when the theme is imported.
+ */
+async function importTheme(file) {
+    if (!file) {
+        return;
+    }
+
+    const fileText = await getFileText(file);
+    const parsed = JSON.parse(fileText);
+
+    if (!parsed.name) {
+        throw new Error('Missing name');
+    }
+
+    if (themes.some(t => t.name === parsed.name)) {
+        throw new Error('Theme with that name already exists');
+    }
+
+    if (typeof parsed.custom_css === 'string' && parsed.custom_css.includes('@import')) {
+        const confirm = await callPopup('This theme contains @import lines in the Custom CSS. Press "Yes" to proceed.', 'confirm', '', { okButton: 'Yes' });
+        if (!confirm) {
+            throw new Error('Theme contains @import lines');
+        }
+    }
+
+    themes.push(parsed);
+    await applyTheme(parsed.name);
+    await saveTheme(parsed.name);
+    const option = document.createElement('option');
+    option.selected = true;
+    option.value = parsed.name;
+    option.innerText = parsed.name;
+    $('#themes').append(option);
+    saveSettingsDebounced();
+}
+
+/**
+ * Saves the current theme to the server.
+ * @param {string|undefined} name Theme name. If undefined, a popup will be shown to enter a name.
+ * @returns {Promise<object>} A promise that resolves when the theme is saved.
+ */
+async function saveTheme(name = undefined) {
+    if (typeof name !== 'string') {
+        name = await callPopup('Enter a theme preset name:', 'input', power_user.theme);
+
+        if (!name) {
+            return;
+        }
     }
 
     const theme = {
@@ -1901,6 +2101,7 @@ async function saveTheme() {
         blur_strength: power_user.blur_strength,
         main_text_color: power_user.main_text_color,
         italics_text_color: power_user.italics_text_color,
+        underline_text_color: power_user.underline_text_color,
         quote_text_color: power_user.quote_text_color,
         blur_tint_color: power_user.blur_tint_color,
         chat_tint_color: power_user.chat_tint_color,
@@ -1928,9 +2129,11 @@ async function saveTheme() {
         hotswap_enabled: power_user.hotswap_enabled,
         custom_css: power_user.custom_css,
         bogus_folders: power_user.bogus_folders,
+        reduced_motion: power_user.reduced_motion,
+        compact_input_area: power_user.compact_input_area,
     };
 
-    const response = await fetch('/savetheme', {
+    const response = await fetch('/api/themes/save', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(theme),
@@ -1955,6 +2158,8 @@ async function saveTheme() {
         power_user.theme = name;
         saveSettingsDebounced();
     }
+
+    return theme;
 }
 
 async function saveMovingUI() {
@@ -1970,7 +2175,7 @@ async function saveMovingUI() {
     };
     console.log(movingUIPreset);
 
-    const response = await fetch('/savemovingui', {
+    const response = await fetch('/api/moving-ui/save', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(movingUIPreset),
@@ -1999,6 +2204,22 @@ async function saveMovingUI() {
     }
 }
 
+/**
+ * Resets the movable styles of the given element to their unset values.
+ * @param {string} id Element ID
+ */
+export function resetMovableStyles(id) {
+    const panelStyles = ['top', 'left', 'right', 'bottom', 'height', 'width', 'margin'];
+
+    const panel = document.getElementById(id);
+
+    if (panel) {
+        panelStyles.forEach((style) => {
+            panel.style[style] = '';
+        });
+    }
+}
+
 async function resetMovablePanels(type) {
     const panelIds = [
         'sheld',
@@ -2010,6 +2231,8 @@ async function resetMovablePanels(type) {
         'groupMemberListPopout',
         'summaryExtensionPopout',
         'gallery',
+        'logprobsViewer',
+        'cfgConfig',
     ];
 
     const panelStyles = ['top', 'left', 'right', 'bottom', 'height', 'width', 'margin'];
@@ -2701,6 +2924,12 @@ $(document).ready(() => {
         saveSettingsDebounced();
     });
 
+    $('#streaming_fps').on('input', function () {
+        power_user.streaming_fps = Number($('#streaming_fps').val());
+        $('#streaming_fps_counter').val(power_user.streaming_fps);
+        saveSettingsDebounced();
+    });
+
     $('input[name="font_scale"]').on('input', async function (e) {
         power_user.font_scale = Number(e.target.value);
         $('#font_scale_counter').val(power_user.font_scale);
@@ -2734,6 +2963,12 @@ $(document).ready(() => {
     $('#italics-color-picker').on('change', (evt) => {
         power_user.italics_text_color = evt.detail.rgba;
         applyThemeColor('italics');
+        saveSettingsDebounced();
+    });
+
+    $('#underline-color-picker').on('change', (evt) => {
+        power_user.underline_text_color = evt.detail.rgba;
+        applyThemeColor('underline');
         saveSettingsDebounced();
     });
 
@@ -2794,7 +3029,9 @@ $(document).ready(() => {
         saveSettingsDebounced();
     });
 
-    $('#ui-preset-save-button').on('click', saveTheme);
+    $('#ui-preset-save-button').on('click', () => saveTheme());
+    $('#ui-preset-update-button').on('click', () => updateTheme());
+    $('#ui-preset-delete-button').on('click', () => deleteTheme());
     $('#movingui-preset-save-button').on('click', saveMovingUI);
 
     $('#never_resize_avatars').on('input', function () {
@@ -2877,6 +3114,11 @@ $(document).ready(() => {
         saveSettingsDebounced();
     });
 
+    $('#request_token_probabilities').on('input', function () {
+        power_user.request_token_probabilities = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
     $('#auto_scroll_chat_to_bottom').on('input', function () {
         power_user.auto_scroll_chat_to_bottom = !!$(this).prop('checked');
         saveSettingsDebounced();
@@ -2885,6 +3127,7 @@ $(document).ready(() => {
     $('#tokenizer').on('change', function () {
         const value = $(this).find(':selected').val();
         power_user.tokenizer = Number(value);
+        BIAS_CACHE.clear();
         saveSettingsDebounced();
 
         // Trigger character editor re-tokenize
@@ -3134,11 +3377,58 @@ $(document).ready(() => {
         saveSettingsDebounced();
     });
 
-    $('#reduced_motion').on('input', function() {
+    $('#reduced_motion').on('input', function () {
         power_user.reduced_motion = !!$(this).prop('checked');
         localStorage.setItem(storage_keys.reduced_motion, String(power_user.reduced_motion));
         switchReducedMotion();
         saveSettingsDebounced();
+    });
+
+    $('#compact_input_area').on('input', function () {
+        power_user.compact_input_area = !!$(this).prop('checked');
+        localStorage.setItem(storage_keys.compact_input_area, String(power_user.compact_input_area));
+        switchCompactInputArea();
+        saveSettingsDebounced();
+    });
+
+    $('#auto-connect-checkbox').on('input', function () {
+        power_user.auto_connect = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#auto-load-chat-checkbox').on('input', function () {
+        power_user.auto_load_chat = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#forbid_external_images').on('input', function () {
+        power_user.forbid_external_images = !!$(this).prop('checked');
+        saveSettingsDebounced();
+        reloadCurrentChat();
+    });
+
+    $('#ui_preset_import_button').on('click', function () {
+        $('#ui_preset_import_file').trigger('click');
+    });
+
+    $('#ui_preset_import_file').on('change', async function () {
+        const inputElement = this instanceof HTMLInputElement && this;
+
+        try {
+            const file = inputElement?.files?.[0];
+            await importTheme(file);
+        } catch (error) {
+            console.error('Error importing UI theme', error);
+            toastr.error(String(error), 'Failed to import UI theme');
+        } finally {
+            if (inputElement) {
+                inputElement.value = null;
+            }
+        }
+    });
+
+    $('#ui_preset_export_button').on('click', async function () {
+        await exportTheme();
     });
 
     $(document).on('click', '#debug_table [data-debug-function]', function () {

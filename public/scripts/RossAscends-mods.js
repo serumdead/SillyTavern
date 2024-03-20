@@ -1,10 +1,8 @@
 import {
-    Generate,
     characters,
     online_status,
     main_api,
     api_server,
-    api_server_textgenerationwebui,
     is_send_press,
     max_context,
     saveSettingsDebounced,
@@ -13,11 +11,13 @@ import {
     setActiveGroup,
     setActiveCharacter,
     getEntitiesList,
-    getThumbnailUrl,
+    buildAvatarList,
     selectCharacterById,
     eventSource,
     menu_type,
     substituteParams,
+    callPopup,
+    sendTextareaMessage,
 } from '../script.js';
 
 import {
@@ -26,7 +26,8 @@ import {
 } from './power-user.js';
 
 import { LoadLocal, SaveLocal, LoadLocalBool } from './f-localStorage.js';
-import { selected_group, is_group_generating, getGroupAvatar, groups, openGroupById } from './group-chats.js';
+import { selected_group, is_group_generating, openGroupById } from './group-chats.js';
+import { getTagKeyForEntity } from './tags.js';
 import {
     SECRET_KEYS,
     secret_state,
@@ -34,8 +35,9 @@ import {
 import { debounce, delay, getStringHash, isValidUrl } from './utils.js';
 import { chat_completion_sources, oai_settings } from './openai.js';
 import { getTokenCount } from './tokenizers.js';
-import { textgen_types, textgenerationwebui_settings as textgen_settings } from './textgen-settings.js';
+import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
 
+import Bowser from '../lib/bowser.min.js';
 
 var RPanelPin = document.getElementById('rm_button_panel_pin');
 var LPanelPin = document.getElementById('lm_button_panel_pin');
@@ -46,8 +48,6 @@ var LeftNavPanel = document.getElementById('left-nav-panel');
 var WorldInfo = document.getElementById('WorldInfo');
 
 var SelectedCharacterTab = document.getElementById('rm_button_selected_ch');
-var AutoConnectCheckbox = document.getElementById('auto-connect-checkbox');
-var AutoLoadChatCheckbox = document.getElementById('auto-load-chat-checkbox');
 
 var connection_made = false;
 var retry_delay = 500;
@@ -61,6 +61,16 @@ const observer = new MutationObserver(function (mutations) {
             RA_checkOnlineStatus();
         } else if (mutation.target.parentNode === SelectedCharacterTab) {
             setTimeout(RA_CountCharTokens, 200);
+        } else if (mutation.target.classList.contains('mes_text')) {
+            if (mutation.target instanceof HTMLElement) {
+                for (const element of mutation.target.getElementsByTagName('math')) {
+                    element.childNodes.forEach(function (child) {
+                        if (child.nodeType === Node.TEXT_NODE) {
+                            child.textContent = '';
+                        }
+                    });
+                }
+            }
         }
     });
 });
@@ -98,43 +108,22 @@ export function humanizeGenTime(total_gen_time) {
     return time_spent;
 }
 
+let parsedUA = null;
+try {
+    parsedUA = Bowser.parse(navigator.userAgent);
+} catch {
+    // In case the user agent is an empty string or Bowser can't parse it for some other reason
+}
+
+
 /**
  * Checks if the device is a mobile device.
  * @returns {boolean} - True if the device is a mobile device, false otherwise.
  */
 export function isMobile() {
-    const mobileTypes = ['smartphone', 'tablet', 'phablet', 'feature phone', 'portable media player'];
-    const deviceInfo = getDeviceInfo();
+    const mobileTypes = ['mobile', 'tablet'];
 
-    return mobileTypes.includes(deviceInfo?.device?.type);
-}
-
-/**
- * Loads device info from the server. Caches the result in sessionStorage.
- * @returns {object} - The device info object.
- */
-export function getDeviceInfo() {
-    let deviceInfo = null;
-
-    if (sessionStorage.getItem('deviceInfo')) {
-        deviceInfo = JSON.parse(sessionStorage.getItem('deviceInfo'));
-    } else {
-        $.ajax({
-            url: '/deviceinfo',
-            dataType: 'json',
-            async: false,
-            cache: true,
-            success: function (result) {
-                sessionStorage.setItem('deviceInfo', JSON.stringify(result));
-                deviceInfo = result;
-            },
-            error: function () {
-                console.log('Couldn\'t load device info. Defaulting to desktop');
-                deviceInfo = { device: { type: 'desktop' } };
-            },
-        });
-    }
-    return deviceInfo;
+    return mobileTypes.includes(parsedUA?.platform?.type);
 }
 
 function shouldSendOnEnter() {
@@ -259,13 +248,14 @@ export function RA_CountCharTokens() {
 async function RA_autoloadchat() {
     if (document.querySelector('#rm_print_characters_block .character_select') !== null) {
         // active character is the name, we should look it up in the character list and get the id
-        let active_character_id = Object.keys(characters).find(key => characters[key].avatar === active_character);
-
-        if (active_character_id !== null) {
-            await selectCharacterById(String(active_character_id));
+        if (active_character !== null && active_character !== undefined) {
+            const active_character_id = characters.findIndex(x => getTagKeyForEntity(x) === active_character);
+            if (active_character_id !== null) {
+                await selectCharacterById(String(active_character_id));
+            }
         }
 
-        if (active_group != null) {
+        if (active_group !== null && active_group !== undefined) {
             await openGroupById(String(active_group));
         }
 
@@ -276,82 +266,16 @@ async function RA_autoloadchat() {
 export async function favsToHotswap() {
     const entities = getEntitiesList({ doFilter: false });
     const container = $('#right-nav-panel .hotswap');
-    const template = $('#hotswap_template .hotswapAvatar');
-    const DEFAULT_COUNT = 6;
-    const WIDTH_PER_ITEM = 60; // 50px + 5px gap + 5px padding
-    const containerWidth = container.outerWidth();
-    const maxCount = containerWidth > 0 ? Math.floor(containerWidth / WIDTH_PER_ITEM) : DEFAULT_COUNT;
-    let count = 0;
 
-    const promises = [];
-    const newContainer = container.clone();
-    newContainer.empty();
+    const favs = entities.filter(x => x.item.fav || x.item.fav == 'true');
 
-    for (const entity of entities) {
-        if (count >= maxCount) {
-            break;
-        }
-
-        const isFavorite = entity.item.fav || entity.item.fav == 'true';
-
-        if (!isFavorite) {
-            continue;
-        }
-
-        const isCharacter = entity.type === 'character';
-        const isGroup = entity.type === 'group';
-
-        const grid = isGroup ? entity.id : '';
-        const chid = isCharacter ? entity.id : '';
-
-        let slot = template.clone();
-        slot.toggleClass('character_select', isCharacter);
-        slot.toggleClass('group_select', isGroup);
-        slot.attr('grid', isGroup ? grid : '');
-        slot.attr('chid', isCharacter ? chid : '');
-        slot.data('id', isGroup ? grid : chid);
-
-        if (isGroup) {
-            const group = groups.find(x => x.id === grid);
-            const avatar = getGroupAvatar(group);
-            $(slot).find('img').replaceWith(avatar);
-            $(slot).attr('title', group.name);
-        }
-
-        if (isCharacter) {
-            const imgLoadPromise = new Promise((resolve) => {
-                const avatarUrl = getThumbnailUrl('avatar', entity.item.avatar);
-                $(slot).find('img').attr('src', avatarUrl).on('load', resolve);
-                $(slot).attr('title', entity.item.avatar);
-            });
-
-            // if the image doesn't load in 500ms, resolve the promise anyway
-            promises.push(Promise.race([imgLoadPromise, delay(500)]));
-        }
-
-        $(slot).css('cursor', 'pointer');
-        newContainer.append(slot);
-        count++;
-    }
-
-    // don't fill leftover spaces with avatar placeholders
-    // just evenly space the selected avatars instead
-    /*
-   if (count < maxCount) { //if any space is left over
-        let leftOverSlots = maxCount - count;
-        for (let i = 1; i <= leftOverSlots; i++) {
-            newContainer.append(template.clone());
-        }
-    }
-    */
-
-    await Promise.allSettled(promises);
     //helpful instruction message if no characters are favorited
-    if (count === 0) { container.html('<small><span><i class="fa-solid fa-star"></i> Favorite characters to add them to HotSwaps</span></small>'); }
-    //otherwise replace with fav'd characters
-    if (count > 0) {
-        container.replaceWith(newContainer);
+    if (favs.length == 0) {
+        container.html('<small><span><i class="fa-solid fa-star"></i> <span data-i18n="Favorite characters to add them to HotSwaps">Favorite characters to add them to HotSwaps</span></span></small>');
+        return;
     }
+
+    buildAvatarList(container, favs, { selectable: true, highlightFavs: false });
 }
 
 //changes input bar and send button display depending on connection status
@@ -388,7 +312,7 @@ function RA_autoconnect(PrevApi) {
         setTimeout(RA_autoconnect, 100);
         return;
     }
-    if (online_status === 'no_connection' && LoadLocalBool('AutoConnectEnabled')) {
+    if (online_status === 'no_connection' && power_user.auto_connect) {
         switch (main_api) {
             case 'kobold':
                 if (api_server && isValidUrl(api_server)) {
@@ -401,10 +325,15 @@ function RA_autoconnect(PrevApi) {
                 }
                 break;
             case 'textgenerationwebui':
-                if (textgen_settings.type === textgen_types.MANCER && secret_state[SECRET_KEYS.MANCER]) {
+                if ((textgen_settings.type === textgen_types.MANCER && secret_state[SECRET_KEYS.MANCER])
+                    || (textgen_settings.type === textgen_types.TOGETHERAI && secret_state[SECRET_KEYS.TOGETHERAI])
+                    || (textgen_settings.type === textgen_types.INFERMATICAI && secret_state[SECRET_KEYS.INFERMATICAI])
+                    || (textgen_settings.type === textgen_types.DREAMGEN && secret_state[SECRET_KEYS.DREAMGEN])
+                    || (textgen_settings.type === textgen_types.OPENROUTER && secret_state[SECRET_KEYS.OPENROUTER])
+                ) {
                     $('#api_button_textgenerationwebui').trigger('click');
                 }
-                else if (api_server_textgenerationwebui && isValidUrl(api_server_textgenerationwebui)) {
+                else if (isValidUrl(getTextGenServer())) {
                     $('#api_button_textgenerationwebui').trigger('click');
                 }
                 break;
@@ -415,7 +344,9 @@ function RA_autoconnect(PrevApi) {
                     || (oai_settings.chat_completion_source == chat_completion_sources.WINDOWAI)
                     || (secret_state[SECRET_KEYS.OPENROUTER] && oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER)
                     || (secret_state[SECRET_KEYS.AI21] && oai_settings.chat_completion_source == chat_completion_sources.AI21)
-                    || (secret_state[SECRET_KEYS.PALM] && oai_settings.chat_completion_source == chat_completion_sources.PALM)
+                    || (secret_state[SECRET_KEYS.MAKERSUITE] && oai_settings.chat_completion_source == chat_completion_sources.MAKERSUITE)
+                    || (secret_state[SECRET_KEYS.MISTRALAI] && oai_settings.chat_completion_source == chat_completion_sources.MISTRALAI)
+                    || (isValidUrl(oai_settings.custom_url) && oai_settings.chat_completion_source == chat_completion_sources.CUSTOM)
                 ) {
                     $('#api_button_openai').trigger('click');
                 }
@@ -431,8 +362,7 @@ function RA_autoconnect(PrevApi) {
 }
 
 function OpenNavPanels() {
-    const deviceInfo = getDeviceInfo();
-    if (deviceInfo && deviceInfo.device.type === 'desktop') {
+    if (!isMobile()) {
         //auto-open R nav if locked and previously open
         if (LoadLocalBool('NavLockOn') == true && LoadLocalBool('NavOpened') == true) {
             //console.log("RA -- clicking right nav to open");
@@ -508,7 +438,7 @@ export function dragElement(elmnt) {
             || Number((String(target.height).replace('px', ''))) < 50
             || Number((String(target.width).replace('px', ''))) < 50
             || power_user.movingUI === false
-            || isMobile() === true
+            || isMobile()
         ) {
             console.debug('aborting mutator');
             return;
@@ -716,15 +646,15 @@ export function dragElement(elmnt) {
 }
 
 export async function initMovingUI() {
-    if (isMobile() === false && power_user.movingUI === true) {
+    if (!isMobile() && power_user.movingUI === true) {
         console.debug('START MOVING UI');
         dragElement($('#sheld'));
         dragElement($('#left-nav-panel'));
         dragElement($('#right-nav-panel'));
         dragElement($('#WorldInfo'));
-        await delay(1000);
-        console.debug('loading AN draggable function');
         dragElement($('#floatingPrompt'));
+        dragElement($('#logprobsViewer'));
+        dragElement($('#cfgConfig'));
     }
 }
 
@@ -736,21 +666,19 @@ export function initRossMods() {
         RA_checkOnlineStatus();
     }, 100);
 
-    // read the state of AutoConnect and AutoLoadChat.
-    $(AutoConnectCheckbox).prop('checked', LoadLocalBool('AutoConnectEnabled'));
-    $(AutoLoadChatCheckbox).prop('checked', LoadLocalBool('AutoLoadChatEnabled'));
+    if (power_user.auto_load_chat) {
+        RA_autoloadchat();
+    }
 
-    setTimeout(function () {
-        if (LoadLocalBool('AutoLoadChatEnabled') == true) { RA_autoloadchat(); }
-    }, 200);
+    if (power_user.auto_connect) {
+        RA_autoconnect();
+    }
 
-
-    //Autoconnect on page load if enabled, or when api type is changed
-    if (LoadLocalBool('AutoConnectEnabled') == true) { RA_autoconnect(); }
     $('#main_api').change(function () {
         var PrevAPI = main_api;
         setTimeout(() => RA_autoconnect(PrevAPI), 100);
     });
+
     $('#api_button').click(function () { setTimeout(RA_checkOnlineStatus, 100); });
 
     //toggle pin class when lock toggle clicked
@@ -872,10 +800,6 @@ export function initRossMods() {
         OpenNavPanels();
     }, 300);
 
-    //save AutoConnect and AutoLoadChat prefs
-    $(AutoConnectCheckbox).on('change', function () { SaveLocal('AutoConnectEnabled', $(AutoConnectCheckbox).prop('checked')); });
-    $(AutoLoadChatCheckbox).on('change', function () { SaveLocal('AutoLoadChatEnabled', $(AutoLoadChatCheckbox).prop('checked')); });
-
     $(SelectedCharacterTab).click(function () { SaveLocal('SelectedNavTab', 'rm_button_selected_ch'); });
     $('#rm_button_characters').click(function () { SaveLocal('SelectedNavTab', 'rm_button_characters'); });
 
@@ -883,14 +807,14 @@ export function initRossMods() {
 
     // when a char is selected from the list, save their name as the auto-load character for next page load
     $(document).on('click', '.character_select', function () {
-        const characterId = $(this).find('.avatar').attr('title') || $(this).attr('title');
+        const characterId = $(this).attr('chid') || $(this).data('id');
         setActiveCharacter(characterId);
         setActiveGroup(null);
         saveSettingsDebounced();
     });
 
     $(document).on('click', '.group_select', function () {
-        const groupId = $(this).data('id') || $(this).attr('grid');
+        const groupId = $(this).attr('chid') || $(this).attr('grid') || $(this).data('id');
         setActiveCharacter(null);
         setActiveGroup(groupId);
         saveSettingsDebounced();
@@ -971,9 +895,9 @@ export function initRossMods() {
         //Enter to send when send_textarea in focus
         if ($(':focus').attr('id') === 'send_textarea') {
             const sendOnEnter = shouldSendOnEnter();
-            if (!event.shiftKey && !event.ctrlKey && !event.altKey && event.key == 'Enter' && is_send_press == false && sendOnEnter) {
+            if (!event.shiftKey && !event.ctrlKey && !event.altKey && event.key == 'Enter' && sendOnEnter) {
                 event.preventDefault();
-                Generate();
+                sendTextareaMessage();
             }
         }
         if ($(':focus').attr('id') === 'dialogue_popup_input' && !isMobile()) {
@@ -1015,9 +939,31 @@ export function initRossMods() {
                 console.debug('Accepting edits with Ctrl+Enter');
                 editMesDone.trigger('click');
             } else if (is_send_press == false) {
-                console.debug('Regenerating with Ctrl+Enter');
-                $('#option_regenerate').click();
-                $('#options').hide();
+                const skipConfirmKey = 'RegenerateWithCtrlEnter';
+                const skipConfirm = LoadLocalBool(skipConfirmKey);
+                function doRegenerate() {
+                    console.debug('Regenerating with Ctrl+Enter');
+                    $('#option_regenerate').trigger('click');
+                    $('#options').hide();
+                }
+                if (skipConfirm) {
+                    doRegenerate();
+                } else {
+                    const popupText = `
+                    <div class="marginBot10">Are you sure you want to regenerate the latest message?</div>
+                    <label class="checkbox_label justifyCenter" for="regenerateWithCtrlEnter">
+                        <input type="checkbox" id="regenerateWithCtrlEnter">
+                        Don't ask again
+                    </label>`;
+                    callPopup(popupText, 'confirm').then(result => {
+                        if (!result) {
+                            return;
+                        }
+                        const regenerateWithCtrlEnter = $('#regenerateWithCtrlEnter').prop('checked');
+                        SaveLocal(skipConfirmKey, regenerateWithCtrlEnter);
+                        doRegenerate();
+                    });
+                }
             } else {
                 console.debug('Ctrl+Enter ignored');
             }
@@ -1073,11 +1019,12 @@ export function initRossMods() {
         }
 
         if (event.key == 'ArrowUp') { //edits last message if chatbar is empty and focused
-            //console.log('got uparrow input');
+            console.log('got uparrow input');
             if (
                 $('#send_textarea').val() === '' &&
                 chatbarInFocus === true &&
-                $('.swipe_right:last').css('display') === 'flex' &&
+                //$('.swipe_right:last').css('display') === 'flex' &&
+                $('.last_mes .mes_buttons').is(':visible') &&
                 $('#character_popup').css('display') === 'none' &&
                 $('#shadow_select_chat_popup').css('display') === 'none'
             ) {
@@ -1124,13 +1071,17 @@ export function initRossMods() {
                 .not('#right-nav-panel')
                 .not('#floatingPrompt')
                 .not('#cfgConfig')
+                .not('#logprobsViewer')
+                .not('#movingDivs > div')
                 .is(':visible')) {
                 let visibleDrawerContent = $('.drawer-content:visible')
                     .not('#WorldInfo')
                     .not('#left-nav-panel')
                     .not('#right-nav-panel')
                     .not('#floatingPrompt')
-                    .not('#cfgConfig');
+                    .not('#cfgConfig')
+                    .not('#logprobsViewer')
+                    .not('#movingDivs > div');
                 $(visibleDrawerContent).parent().find('.drawer-icon').trigger('click');
                 return;
             }
@@ -1149,6 +1100,18 @@ export function initRossMods() {
                 $('#CFGClose').trigger('click');
                 return;
             }
+
+            if ($('#logprobsViewer').is(':visible')) {
+                $('#logprobsViewerClose').trigger('click');
+                return;
+            }
+
+            $('#movingDivs > div').each(function () {
+                if ($(this).is(':visible')) {
+                    $('#movingDivs > div .floating_panel_close').trigger('click');
+                    return;
+                }
+            });
 
             if ($('#left-nav-panel').is(':visible') &&
                 $(LPanelPin).prop('checked') === false) {

@@ -29,6 +29,8 @@ const controls = [
     { id: 'instruct_first_output_sequence', property: 'first_output_sequence', isCheckbox: false },
     { id: 'instruct_last_output_sequence', property: 'last_output_sequence', isCheckbox: false },
     { id: 'instruct_activation_regex', property: 'activation_regex', isCheckbox: false },
+    { id: 'instruct_bind_to_context', property: 'bind_to_context', isCheckbox: true },
+    { id: 'instruct_skip_examples', property: 'skip_examples', isCheckbox: true },
 ];
 
 /**
@@ -42,6 +44,10 @@ export function loadInstructMode(data) {
 
     if (power_user.instruct.names_force_groups === undefined) {
         power_user.instruct.names_force_groups = true;
+    }
+
+    if (power_user.instruct.skip_examples === undefined) {
+        power_user.instruct.skip_examples = false;
     }
 
     controls.forEach(control => {
@@ -82,7 +88,7 @@ function highlightDefaultPreset() {
  * Select context template if not already selected.
  * @param {string} preset Preset name.
  */
-function selectContextPreset(preset) {
+export function selectContextPreset(preset) {
     // If context template is not already selected, select it
     if (preset !== power_user.context.preset) {
         $('#context_presets').val(preset).trigger('change');
@@ -136,7 +142,7 @@ export function autoSelectInstructPreset(modelId) {
     let foundMatch = false;
     for (const instruct_preset of instruct_presets) {
         // If instruct preset matches the context template
-        if (instruct_preset.name === power_user.context.preset) {
+        if (power_user.instruct.bind_to_context && instruct_preset.name === power_user.context.preset) {
             foundMatch = true;
             selectInstructPreset(instruct_preset.name);
             break;
@@ -163,7 +169,7 @@ export function autoSelectInstructPreset(modelId) {
             }
         }
 
-        if (power_user.default_instruct && power_user.instruct.preset !== power_user.default_instruct) {
+        if (power_user.instruct.bind_to_context && power_user.default_instruct && power_user.instruct.preset !== power_user.default_instruct) {
             if (instruct_presets.some(p => p.name === power_user.default_instruct)) {
                 console.log(`Instruct mode: default preset "${power_user.default_instruct}" selected`);
                 $('#instruct_presets').val(power_user.default_instruct).trigger('change');
@@ -263,6 +269,7 @@ export function formatInstructModeChat(name, mes, isUser, isNarrator, forceAvata
 
     if (power_user.instruct.macro) {
         sequence = substituteParams(sequence, name1, name2);
+        sequence = sequence.replace(/{{name}}/gi, name || 'System');
     }
 
     const separator = power_user.instruct.wrap ? '\n' : '';
@@ -301,6 +308,10 @@ export function formatInstructModeSystemPrompt(systemPrompt){
  * @returns {string} Formatted example messages string.
  */
 export function formatInstructModeExamples(mesExamples, name1, name2) {
+    if (power_user.instruct.skip_examples) {
+        return mesExamples;
+    }
+
     const includeNames = power_user.instruct.names || (!!selected_group && power_user.instruct.names_force_groups);
 
     let inputSequence = power_user.instruct.input_sequence;
@@ -330,12 +341,13 @@ export function formatInstructModeExamples(mesExamples, name1, name2) {
  * @returns {string} Formatted instruct mode last prompt line.
  */
 export function formatInstructModePrompt(name, isImpersonate, promptBias, name1, name2) {
-    const includeNames = power_user.instruct.names || (!!selected_group && power_user.instruct.names_force_groups);
+    const includeNames = name && (power_user.instruct.names || (!!selected_group && power_user.instruct.names_force_groups));
     const getOutputSequence = () => power_user.instruct.last_output_sequence || power_user.instruct.output_sequence;
     let sequence = isImpersonate ? power_user.instruct.input_sequence : getOutputSequence();
 
     if (power_user.instruct.macro) {
         sequence = substituteParams(sequence, name1, name2);
+        sequence = sequence.replace(/{{name}}/gi, name || 'System');
     }
 
     const separator = power_user.instruct.wrap ? '\n' : '';
@@ -409,6 +421,10 @@ jQuery(() => {
     });
 
     $('#instruct_enabled').on('change', function () {
+        if (!power_user.instruct.bind_to_context) {
+            return;
+        }
+
         // When instruct mode gets enabled, select context template matching selected instruct preset
         if (power_user.instruct.enabled) {
             selectMatchingContextTemplate(power_user.instruct.preset);
@@ -440,8 +456,10 @@ jQuery(() => {
             }
         });
 
-        // Select matching context template
-        selectMatchingContextTemplate(name);
+        if (power_user.instruct.bind_to_context) {
+            // Select matching context template
+            selectMatchingContextTemplate(name);
+        }
 
         highlightDefaultPreset();
     });

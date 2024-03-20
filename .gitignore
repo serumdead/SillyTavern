@@ -23,6 +23,8 @@ public/stats.json
 /config.yaml
 /config.conf.bak
 /docker/config
+/docker/user
+/docker/extensions
 .DS_Store
 public/settings.json
 /thumbnails
@@ -42,3 +44,4 @@ access.log
 /vectors/
 /cache/
 public/css/user.css
+/plugins/

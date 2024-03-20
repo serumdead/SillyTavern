@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 if ! command -v npm &> /dev/null
 then
@@ -28,7 +28,8 @@ if [ ! -z "$REPL_ID" ]; then
 fi
 
 echo "Installing Node Modules..."
-npm i --no-audit
+export NODE_ENV=production
+npm i --no-audit --no-fund --quiet --omit=dev
 
 echo "Entering SillyTavern..."
-node "$(dirname "$0")/server.js"
+node "$(dirname "$0")/server.js" "$@"

@@ -12,11 +12,14 @@ ENTRYPOINT [ "tini", "--" ]
 # Create app directory
 WORKDIR ${APP_HOME}
 
+# Set NODE_ENV to production
+ENV NODE_ENV=production
+
 # Install app dependencies
 COPY package*.json post-install.js ./
 RUN \
   echo "*** Install npm packages ***" && \
-  npm install && npm cache clean --force
+  npm i --no-audit --no-fund --quiet --omit=dev && npm cache clean --force
 
 # Bundle app source
 COPY . ./
@@ -31,11 +34,11 @@ RUN \
   echo "*** Create symbolic links to config directory ***" && \
   for R in $RESOURCES; do ln -s "../config/$R" "public/$R"; done || true && \
   \
-  rm -f "config.yaml" "public/settings.json" "public/css/bg_load.css" || true && \
+  rm -f "config.yaml" "public/settings.json" || true && \
   ln -s "./config/config.yaml" "config.yaml" || true && \
   ln -s "../config/settings.json" "public/settings.json" || true && \
-  ln -s "../../config/bg_load.css" "public/css/bg_load.css" || true && \
-  mkdir "config" || true
+  mkdir "config" || true && \
+  mkdir -p "public/user" || true
 
 # Cleanup unnecessary files
 RUN \

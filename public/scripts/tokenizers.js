@@ -1,12 +1,13 @@
-import { characters, main_api, api_server, api_server_textgenerationwebui, nai_settings, online_status, this_chid } from '../script.js';
+import { characters, main_api, api_server, nai_settings, online_status, this_chid } from '../script.js';
 import { power_user, registerDebugFunction } from './power-user.js';
 import { chat_completion_sources, model_list, oai_settings } from './openai.js';
 import { groups, selected_group } from './group-chats.js';
 import { getStringHash } from './utils.js';
 import { kai_flags } from './kai-settings.js';
-import { textgen_types, textgenerationwebui_settings as textgen_settings } from './textgen-settings.js';
+import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
+import { getCurrentDreamGenModelTokenizer, getCurrentOpenRouterModelTokenizer, openRouterModels } from './textgen-models.js';
 
-const { OOBA, TABBY, KOBOLDCPP, MANCER } = textgen_types;
+const { OOBA, TABBY, KOBOLDCPP, APHRODITE, LLAMACPP, OPENROUTER, DREAMGEN } = textgen_types;
 
 export const CHARACTERS_PER_TOKEN_RATIO = 3.35;
 const TOKENIZER_WARNING_KEY = 'tokenizationWarningShown';
@@ -34,6 +35,8 @@ export const SENTENCEPIECE_TOKENIZERS = [
     //tokenizers.NERD,
     //tokenizers.NERD2,
 ];
+
+export const TEXTGEN_TOKENIZERS = [OOBA, TABBY, KOBOLDCPP, LLAMACPP, APHRODITE];
 
 const TOKENIZER_URLS = {
     [tokenizers.GPT2]: {
@@ -63,6 +66,7 @@ const TOKENIZER_URLS = {
     },
     [tokenizers.API_KOBOLD]: {
         count: '/api/tokenizers/remote/kobold/count',
+        encode: '/api/tokenizers/remote/kobold/count',
     },
     [tokenizers.MISTRAL]: {
         encode: '/api/tokenizers/mistral/encode',
@@ -189,7 +193,7 @@ export function getTokenizerBestMatch(forApi) {
         // - Tokenizer haven't reported an error previously
         const hasTokenizerError = sessionStorage.getItem(TOKENIZER_WARNING_KEY);
         const isConnected = online_status !== 'no_connection';
-        const isTokenizerSupported = textgen_settings.type === OOBA || textgen_settings.type === TABBY || textgen_settings.type === KOBOLDCPP;
+        const isTokenizerSupported = TEXTGEN_TOKENIZERS.includes(textgen_settings.type);
 
         if (!hasTokenizerError && isConnected) {
             if (forApi === 'kobold' && kai_flags.can_use_tokenization) {
@@ -198,6 +202,12 @@ export function getTokenizerBestMatch(forApi) {
 
             if (forApi === 'textgenerationwebui' && isTokenizerSupported) {
                 return tokenizers.API_TEXTGENERATIONWEBUI;
+            }
+            if (forApi === 'textgenerationwebui' && textgen_settings.type === OPENROUTER) {
+                return getCurrentOpenRouterModelTokenizer();
+            }
+            if (forApi === 'textgenerationwebui' && textgen_settings.type === DREAMGEN) {
+                return getCurrentDreamGenModelTokenizer();
             }
         }
 
@@ -346,8 +356,11 @@ export function getTokenizerModel() {
     }
 
     // And for OpenRouter (if not a site model, then it's impossible to determine the tokenizer)
-    if (oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER && oai_settings.openrouter_model) {
-        const model = model_list.find(x => x.id === oai_settings.openrouter_model);
+    if (main_api == 'openai' && oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER && oai_settings.openrouter_model ||
+        main_api == 'textgenerationwebui' && textgen_settings.type === OPENROUTER && textgen_settings.openrouter_model) {
+        const model = main_api == 'openai'
+            ? model_list.find(x => x.id === oai_settings.openrouter_model)
+            : openRouterModels.find(x => x.id === textgen_settings.openrouter_model);
 
         if (model?.architecture?.tokenizer === 'Llama2') {
             return llamaTokenizer;
@@ -375,8 +388,20 @@ export function getTokenizerModel() {
         }
     }
 
+    if (oai_settings.chat_completion_source == chat_completion_sources.MAKERSUITE) {
+        return oai_settings.google_model;
+    }
+
     if (oai_settings.chat_completion_source == chat_completion_sources.CLAUDE) {
         return claudeTokenizer;
+    }
+
+    if (oai_settings.chat_completion_source == chat_completion_sources.MISTRALAI) {
+        return mistralTokenizer;
+    }
+
+    if (oai_settings.chat_completion_source == chat_completion_sources.CUSTOM) {
+        return oai_settings.custom_model;
     }
 
     // Default to Turbo 3.5
@@ -388,6 +413,15 @@ export function getTokenizerModel() {
  */
 export function countTokensOpenAI(messages, full = false) {
     const shouldTokenizeAI21 = oai_settings.chat_completion_source === chat_completion_sources.AI21 && oai_settings.use_ai21_tokenizer;
+    const shouldTokenizeGoogle = oai_settings.chat_completion_source === chat_completion_sources.MAKERSUITE && oai_settings.use_google_tokenizer;
+    let tokenizerEndpoint = '';
+    if (shouldTokenizeAI21) {
+        tokenizerEndpoint = '/api/tokenizers/ai21/count';
+    } else if (shouldTokenizeGoogle) {
+        tokenizerEndpoint = `/api/tokenizers/google/count?model=${getTokenizerModel()}`;
+    } else {
+        tokenizerEndpoint = `/api/tokenizers/openai/count?model=${getTokenizerModel()}`;
+    }
     const cacheObject = getTokenCacheObject();
 
     if (!Array.isArray(messages)) {
@@ -399,7 +433,7 @@ export function countTokensOpenAI(messages, full = false) {
     for (const message of messages) {
         const model = getTokenizerModel();
 
-        if (model === 'claude' || shouldTokenizeAI21) {
+        if (model === 'claude' || shouldTokenizeAI21 || shouldTokenizeGoogle) {
             full = true;
         }
 
@@ -415,7 +449,7 @@ export function countTokensOpenAI(messages, full = false) {
             jQuery.ajax({
                 async: false,
                 type: 'POST', //
-                url: shouldTokenizeAI21 ? '/api/tokenizers/ai21/count' : `/api/tokenizers/openai/count?model=${model}`,
+                url: tokenizerEndpoint,
                 data: JSON.stringify([message]),
                 dataType: 'json',
                 contentType: 'application/json',
@@ -519,10 +553,8 @@ function getTextgenAPITokenizationParams(str) {
     return {
         text: str,
         api_type: textgen_settings.type,
-        url: api_server_textgenerationwebui,
-        legacy_api:
-            textgen_settings.legacy_api &&
-            textgen_settings.type !== MANCER,
+        url: getTextGenServer(),
+        legacy_api: textgen_settings.legacy_api && (textgen_settings.type === OOBA || textgen_settings.type === APHRODITE),
     };
 }
 
@@ -618,12 +650,40 @@ function getTextTokensFromTextgenAPI(str) {
 }
 
 /**
+ * Calls the AI provider's tokenize API to encode a string to tokens.
+ * @param {string} str String to tokenize.
+ * @returns {number[]} Array of token ids.
+ */
+function getTextTokensFromKoboldAPI(str) {
+    let ids = [];
+
+    jQuery.ajax({
+        async: false,
+        type: 'POST',
+        url: TOKENIZER_URLS[tokenizers.API_KOBOLD].encode,
+        data: JSON.stringify({
+            text: str,
+            url: api_server,
+        }),
+        dataType: 'json',
+        contentType: 'application/json',
+        success: function (data) {
+            ids = data.ids;
+        },
+    });
+
+    return ids;
+}
+
+/**
  * Calls the underlying tokenizer model to decode token ids to text.
  * @param {string} endpoint API endpoint.
  * @param {number[]} ids Array of token ids
+ * @returns {({ text: string, chunks?: string[] })} Decoded token text as a single string and individual chunks (if available).
  */
 function decodeTextTokensFromServer(endpoint, ids) {
     let text = '';
+    let chunks = [];
     jQuery.ajax({
         async: false,
         type: 'POST',
@@ -633,9 +693,10 @@ function decodeTextTokensFromServer(endpoint, ids) {
         contentType: 'application/json',
         success: function (data) {
             text = data.text;
+            chunks = data.chunks;
         },
     });
-    return text;
+    return { text, chunks };
 }
 
 /**
@@ -650,6 +711,8 @@ export function getTextTokens(tokenizerType, str) {
             return getTextTokens(currentRemoteTokenizerAPI(), str);
         case tokenizers.API_TEXTGENERATIONWEBUI:
             return getTextTokensFromTextgenAPI(str);
+        case tokenizers.API_KOBOLD:
+            return getTextTokensFromKoboldAPI(str);
         default: {
             const tokenizerEndpoints = TOKENIZER_URLS[tokenizerType];
             if (!tokenizerEndpoints) {
@@ -675,6 +738,7 @@ export function getTextTokens(tokenizerType, str) {
  * Decodes token ids to text using the server API.
  * @param {number} tokenizerType Tokenizer type.
  * @param {number[]} ids Array of token ids
+ * @returns {({ text: string, chunks?: string[] })} Decoded token text as a single string and individual chunks (if available).
  */
 export function decodeTextTokens(tokenizerType, ids) {
     // Currently, neither remote API can decode, but this may change in the future. Put this guard here to be safe
@@ -684,12 +748,12 @@ export function decodeTextTokens(tokenizerType, ids) {
     const tokenizerEndpoints = TOKENIZER_URLS[tokenizerType];
     if (!tokenizerEndpoints) {
         console.warn('Unknown tokenizer type', tokenizerType);
-        return [];
+        return { text: '', chunks: [] };
     }
     let endpointUrl = tokenizerEndpoints.decode;
     if (!endpointUrl) {
         console.warn('This tokenizer type does not support decoding', tokenizerType);
-        return [];
+        return { text: '', chunks: [] };
     }
     if (tokenizerType === tokenizers.OPENAI) {
         endpointUrl += `?model=${getTokenizerModel()}`;

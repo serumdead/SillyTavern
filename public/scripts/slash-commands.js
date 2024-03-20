@@ -20,7 +20,7 @@ import {
     main_api,
     name1,
     reloadCurrentChat,
-    replaceBiasMarkup,
+    removeMacros,
     saveChatConditional,
     sendMessageAsUser,
     sendSystemMessage,
@@ -37,9 +37,11 @@ import { getMessageTimeStamp } from './RossAscends-mods.js';
 import { hideChatMessage, unhideChatMessage } from './chats.js';
 import { getContext, saveMetadataDebounced } from './extensions.js';
 import { getRegexedString, regex_placement } from './extensions/regex/engine.js';
-import { findGroupMemberId, groups, is_group_generating, resetSelectedGroup, saveGroupChat, selected_group } from './group-chats.js';
+import { findGroupMemberId, groups, is_group_generating, openGroupById, resetSelectedGroup, saveGroupChat, selected_group } from './group-chats.js';
+import { chat_completion_sources, oai_settings } from './openai.js';
 import { autoSelectPersona } from './personas.js';
 import { addEphemeralStoppingString, chat_styles, flushEphemeralStoppingStrings, power_user } from './power-user.js';
+import { textgen_types, textgenerationwebui_settings } from './textgen-settings.js';
 import { decodeTextTokens, getFriendlyTokenizerName, getTextTokens, getTokenCount } from './tokenizers.js';
 import { delay, isFalseBoolean, isTrueBoolean, stringToRange, trimToEndSentence, trimToStartSentence, waitUntilCondition } from './utils.js';
 import { registerVariableCommands, resolveVariable } from './variables.js';
@@ -76,46 +78,93 @@ class SlashCommandParser {
         this.helpStrings[command] = stringBuilder;
     }
 
+    /**
+     * Parses a slash command to extract the command name, the (named) arguments and the remaining text
+     * @param {string} text - Slash command text
+     * @returns {{command: string, args: object, value: string}} - The parsed command, its arguments and the remaining text
+     */
     parse(text) {
+        // Parses a command even when spaces are present in arguments
+        // /buttons labels=["OK","I do not accept"] some text
+        // /fuzzy list=[ "red pink" , "yellow" ] threshold=" 0.6 " he yelled when the color was reddish and not pink | /echo
         const excludedFromRegex = ['sendas'];
-        const firstSpace = text.indexOf(' ');
-        const command = firstSpace !== -1 ? text.substring(1, firstSpace) : text.substring(1);
-        const args = firstSpace !== -1 ? text.substring(firstSpace + 1) : '';
+        let command = '';
         const argObj = {};
-        let unnamedArg;
+        let unnamedArg = '';
 
-        if (args.length > 0) {
-            // Match named arguments
-            const namedArgPattern = /(\w+)=("(?:\\.|[^"\\])*"|\S+)/g;
-            let match;
-            while ((match = namedArgPattern.exec(args)) !== null) {
-                const key = match[1];
-                const value = match[2];
-                // Remove the quotes around the value, if any
-                argObj[key] = value.replace(/(^")|("$)/g, '');
-            }
-
-            // Match unnamed argument
-            const unnamedArgPattern = /(?:\w+=(?:"(?:\\.|[^"\\])*"|\S+)\s*)*(.*)/s;
-            match = unnamedArgPattern.exec(args);
-            if (match !== null) {
-                unnamedArg = match[1].trim();
-            }
-
-            // Excluded commands format in their own function
-            if (!excludedFromRegex.includes(command)) {
-                unnamedArg = getRegexedString(
-                    unnamedArg,
-                    regex_placement.SLASH_COMMAND,
-                );
-            }
+        // extract the command " /fuzzy   " => "fuzzy"
+        text = text.trim();
+        let remainingText = '';
+        const commandArgPattern = /^\/([^\s]+)\s*(.*)$/s;
+        let match = commandArgPattern.exec(text);
+        if (match !== null && match[1].length > 0) {
+            command = match[1];
+            remainingText = match[2];
+            console.debug('command:' + command);
         }
 
+        // parse the rest of the string to extract named arguments, the remainder is the "unnamedArg" which is usually text, like the prompt to send
+        while (remainingText.length > 0) {
+            // does the remaining text is like     nameArg=[value]   or  nameArg=[value,value] or  nameArg=[  value , value , value]
+            // where value can be a string like   " this is some text "  , note previously it was not possible to have have spaces
+            // where value can be a scalar like   AScalar
+            // where value can be a number like   +9   -1005.44
+            // where value can be a macro like    {{getvar::name}}
+            const namedArrayArgPattern = /^(\w+)=\[\s*(((?<quote>["'])[^"]*(\k<quote>)|{{[^}]*}}|[+-]?\d*\.?\d+|\w*)\s*,?\s*)+\]/s;
+            match = namedArrayArgPattern.exec(remainingText);
+            if (match !== null && match[0].length > 0) {
+                //console.log(`matching: ${match[0]}`);
+                const posFirstEqual = match[0].indexOf('=');
+                const key = match[0].substring(0, posFirstEqual).trim();
+                const value = match[0].substring(posFirstEqual + 1).trim();
+
+                // Remove the quotes around the value, if any
+                argObj[key] = value.replace(/(^")|("$)/g, '');
+                remainingText = remainingText.slice(match[0].length + 1).trim();
+                continue;
+            }
+
+            // does the remaining text is like     nameArg=value
+            // where value can be a string like   " this is some text "  , note previously it was not possible to have have spaces
+            // where value can be a scalar like   AScalar
+            // where value can be a number like   +9   -1005.44
+            // where value can be a macro like    {{getvar::name}}
+            const namedScalarArgPattern = /^(\w+)=(((?<quote>["'])[^"]*(\k<quote>)|{{[^}]*}}|[+-]?\d*\.?\d+|\w*))/s;
+            match = namedScalarArgPattern.exec(remainingText);
+            if (match !== null && match[0].length > 0) {
+                //console.log(`matching: ${match[0]}`);
+                const posFirstEqual = match[0].indexOf('=');
+                const key = match[0].substring(0, posFirstEqual).trim();
+                const value = match[0].substring(posFirstEqual + 1).trim();
+
+                // Remove the quotes around the value, if any
+                argObj[key] = value.replace(/(^")|("$)/g, '');
+                remainingText = remainingText.slice(match[0].length + 1).trim();
+                continue;
+            }
+
+            // the remainder that matches no named argument is the "unamedArg" previously mentioned
+            unnamedArg = remainingText.trim();
+            remainingText = '';
+        }
+
+        // Excluded commands format in their own function
+        if (!excludedFromRegex.includes(command)) {
+            console.debug(`parse: !excludedFromRegex.includes(${command}`);
+            console.debug(`   parse: unnamedArg before: ${unnamedArg}`);
+            unnamedArg = getRegexedString(
+                unnamedArg,
+                regex_placement.SLASH_COMMAND,
+            );
+            console.debug(`   parse: unnamedArg after: ${unnamedArg}`);
+        }
+
+        // your weird complex command is now transformed into a juicy tiny text or something useful :)
         if (this.commands[command]) {
             return { command: this.commands[command], args: argObj, value: unnamedArg };
         }
 
-        return false;
+        return null;
     }
 
     getHelpString() {
@@ -138,7 +187,7 @@ const getSlashCommandsHelp = parser.getHelpString.bind(parser);
 
 parser.addCommand('?', helpCommandCallback, ['help'], ' – get help on macros, chat formatting and commands', true, true);
 parser.addCommand('name', setNameCallback, ['persona'], '<span class="monospace">(name)</span> – sets user name and persona avatar (if set)', true, true);
-parser.addCommand('sync', syncCallback, [], ' – syncs user name in user-attributed messages in the current chat', true, true);
+parser.addCommand('sync', syncCallback, [], ' – syncs the user persona in user-attributed messages in the current chat', true, true);
 parser.addCommand('lock', bindCallback, ['bind'], ' – locks/unlocks a persona (name and avatar) to the current chat', true, true);
 parser.addCommand('bg', setBackgroundCallback, ['background'], '<span class="monospace">(filename)</span> – sets a background according to filename, partial names allowed', false, true);
 parser.addCommand('sendas', sendMessageAs, [], ' – sends message as a specific character. Uses character avatar if it exists in the characters list. Example that will send "Hello, guys!" from "Chloe": <tt>/sendas name="Chloe" Hello, guys!</tt>', true, true);
@@ -148,13 +197,13 @@ parser.addCommand('comment', sendCommentMessage, [], '<span class="monospace">(t
 parser.addCommand('single', setStoryModeCallback, ['story'], ' – sets the message style to single document mode without names or avatars visible', true, true);
 parser.addCommand('bubble', setBubbleModeCallback, ['bubbles'], ' – sets the message style to bubble chat mode', true, true);
 parser.addCommand('flat', setFlatModeCallback, ['default'], ' – sets the message style to flat chat mode', true, true);
-parser.addCommand('continue', continueChatCallback, ['cont'], ' – continues the last message in the chat', true, true);
-parser.addCommand('go', goToCharacterCallback, ['char'], '<span class="monospace">(name)</span> – opens up a chat with the character by its name', true, true);
+parser.addCommand('continue', continueChatCallback, ['cont'], '<span class="monospace">[prompt]</span> – continues the last message in the chat, with an optional additional prompt', true, true);
+parser.addCommand('go', goToCharacterCallback, ['char'], '<span class="monospace">(name)</span> – opens up a chat with the character or group by its name', true, true);
 parser.addCommand('sysgen', generateSystemMessage, [], '<span class="monospace">(prompt)</span> – generates a system message using a specified prompt', true, true);
 parser.addCommand('ask', askCharacter, [], '<span class="monospace">(prompt)</span> – asks a specified character card a prompt', true, true);
 parser.addCommand('delname', deleteMessagesByNameCallback, ['cancel'], '<span class="monospace">(name)</span> – deletes all messages attributed to a specified name', true, true);
 parser.addCommand('send', sendUserMessageCallback, [], '<span class="monospace">(text)</span> – adds a user message to the chat log without triggering a generation', true, true);
-parser.addCommand('trigger', triggerGenerationCallback, [], ' – triggers a message generation. If in group, can trigger a message for the specified group member index or name.', true, true);
+parser.addCommand('trigger', triggerGenerationCallback, [], ' <span class="monospace">await=true/false</span> – triggers a message generation. If in group, can trigger a message for the specified group member index or name. If <code>await=true</code> named argument passed, the command will await for the triggered generation before continuing.', true, true);
 parser.addCommand('hide', hideMessageCallback, [], '<span class="monospace">(message index or range)</span> – hides a chat message from the prompt', true, true);
 parser.addCommand('unhide', unhideMessageCallback, [], '<span class="monospace">(message index or range)</span> – unhides a message from the prompt', true, true);
 parser.addCommand('disable', disableGroupMemberCallback, [], '<span class="monospace">(member index or name)</span> – disables a group member from being drafted for replies', true, true);
@@ -167,15 +216,14 @@ parser.addCommand('peek', peekCallback, [], '<span class="monospace">(message in
 parser.addCommand('delswipe', deleteSwipeCallback, ['swipedel'], '<span class="monospace">(optional 1-based id)</span> – deletes a swipe from the last chat message. If swipe id not provided - deletes the current swipe.', true, true);
 parser.addCommand('echo', echoCallback, [], '<span class="monospace">(title=string severity=info/warning/error/success [text])</span> – echoes the text to toast message. Useful for pipes debugging.', true, true);
 //parser.addCommand('#', (_, value) => '', [], ' – a comment, does nothing, e.g. <tt>/# the next three commands switch variables a and b</tt>', true, true);
-parser.addCommand('gen', generateCallback, [], '<span class="monospace">(lock=on/off [prompt])</span> – generates text using the provided prompt and passes it to the next command through the pipe, optionally locking user input while generating.', true, true);
+parser.addCommand('gen', generateCallback, [], '<span class="monospace">(lock=on/off name="System" [prompt])</span> – generates text using the provided prompt and passes it to the next command through the pipe, optionally locking user input while generating and allowing to configure the in-prompt name for instruct mode (default = "System").', true, true);
 parser.addCommand('genraw', generateRawCallback, [], '<span class="monospace">(lock=on/off [prompt])</span> – generates text using the provided prompt and passes it to the next command through the pipe, optionally locking user input while generating. Does not include chat history or character card. Use instruct=off to skip instruct formatting, e.g. <tt>/genraw instruct=off Why is the sky blue?</tt>. Use stop=... with a JSON-serialized array to add one-time custom stop strings, e.g. <tt>/genraw stop=["\\n"] Say hi</tt>', true, true);
 parser.addCommand('addswipe', addSwipeCallback, ['swipeadd'], '<span class="monospace">(text)</span> – adds a swipe to the last chat message.', true, true);
 parser.addCommand('abort', abortCallback, [], ' – aborts the slash command batch execution', true, true);
-parser.addCommand('fuzzy', fuzzyCallback, [], 'list=["a","b","c"] (search value) – performs a fuzzy match of the provided search using the provided list of value and passes the closest match to the next command through the pipe.', true, true);
-parser.addCommand('pass', (_, arg) => arg, ['return'], '<span class="monospace">(text)</span> – passes the text to the next command through the pipe.', true, true);
+parser.addCommand('fuzzy', fuzzyCallback, [], 'list=["a","b","c"] threshold=0.4 (text to search) – performs a fuzzy match of each items of list within the text to search. If any item matches then its name is returned. If no item list matches the text to search then no value is returned. The optional threshold (default is 0.4) allows some control over the matching. A low value (min 0.0) means the match is very strict. At 1.0 (max) the match is very loose and probably matches anything. The returned value passes to the next command through the pipe.', true, true); parser.addCommand('pass', (_, arg) => arg, ['return'], '<span class="monospace">(text)</span> – passes the text to the next command through the pipe.', true, true);
 parser.addCommand('delay', delayCallback, ['wait', 'sleep'], '<span class="monospace">(milliseconds)</span> – delays the next command in the pipe by the specified number of milliseconds.', true, true);
 parser.addCommand('input', inputCallback, ['prompt'], '<span class="monospace">(default="string" large=on/off wide=on/off okButton="string" rows=number [text])</span> – Shows a popup with the provided text and an input field. The default argument is the default value of the input field, and the text argument is the text to display.', true, true);
-parser.addCommand('run', runCallback, ['call', 'exec'], '<span class="monospace">(QR label)</span> – runs a Quick Reply with the specified name from the current preset.', true, true);
+parser.addCommand('run', runCallback, ['call', 'exec'], '<span class="monospace">[key1=value key2=value ...] ([qrSet.]qrLabel)</span> – runs a Quick Reply with the specified name from a currently active preset or from another preset, named arguments can be referenced in a QR with {{arg::key}}.', true, true);
 parser.addCommand('messages', getMessagesCallback, ['message'], '<span class="monospace">(names=off/on [message index or range])</span> – returns the specified message or range of messages as a string.', true, true);
 parser.addCommand('setinput', setInputCallback, [], '<span class="monospace">(text)</span> – sets the user input to the specified text and passes it to the next command through the pipe.', true, true);
 parser.addCommand('popup', popupCallback, [], '<span class="monospace">(large=on/off wide=on/off okButton="string" text)</span> – shows a blocking popup with the specified text and buttons. Returns the input value into the pipe or empty string if canceled.', true, true);
@@ -186,6 +234,8 @@ parser.addCommand('trimend', trimEndCallback, [], '<span class="monospace">(text
 parser.addCommand('inject', injectCallback, [], '<span class="monospace">id=injectId (position=before/after/chat depth=number [text])</span> – injects a text into the LLM prompt for the current chat. Requires a unique injection ID. Positions: "before" main prompt, "after" main prompt, in-"chat" (default: after). Depth: injection depth for the prompt (default: 4).', true, true);
 parser.addCommand('listinjects', listInjectsCallback, [], ' – lists all script injections for the current chat.', true, true);
 parser.addCommand('flushinjects', flushInjectsCallback, [], ' – removes all script injections for the current chat.', true, true);
+parser.addCommand('tokens', (_, text) => getTokenCount(text), [], '<span class="monospace">(text)</span> – counts the number of tokens in the text.', true, true);
+parser.addCommand('model', modelCallback, [], '<span class="monospace">(model name)</span> – sets the model for the current API.', true, true);
 registerVariableCommands();
 
 const NARRATOR_NAME_KEY = 'narrator_name';
@@ -353,8 +403,8 @@ function trimTokensCallback(arg, value) {
         }
 
         const sliceTokens = direction === 'start' ? textTokens.slice(0, limit) : textTokens.slice(-limit);
-        const decodedText = decodeTextTokens(tokenizerId, sliceTokens);
-        return decodedText;
+        const { text } = decodeTextTokens(tokenizerId, sliceTokens);
+        return text;
     } catch (error) {
         console.warn('WARN: Tokenization failed for /trimtokens command, returning original', error);
         return value;
@@ -444,7 +494,7 @@ function getMessagesCallback(args, value) {
     return messages.join('\n\n');
 }
 
-async function runCallback(_, name) {
+async function runCallback(args, name) {
     if (!name) {
         toastr.warning('No name provided for /run command');
         return '';
@@ -457,7 +507,7 @@ async function runCallback(_, name) {
 
     try {
         name = name.trim();
-        return await window['executeQuickReplyByName'](name);
+        return await window['executeQuickReplyByName'](name, args);
     } catch (error) {
         toastr.error(`Error running Quick Reply "${name}": ${error.message}`, 'Error');
         return '';
@@ -499,8 +549,17 @@ async function inputCallback(args, prompt) {
     return result || '';
 }
 
-function fuzzyCallback(args, value) {
-    if (!value) {
+/**
+ * Each item in "args.list" is searched within "search_item" using fuzzy search. If any matches it returns the matched "item".
+ * @param {FuzzyCommandArgs} args - arguments containing "list" (JSON array) and optionaly "threshold" (float between 0.0 and 1.0)
+ * @param {string} searchInValue - the string where items of list are searched
+ * @returns {string} - the matched item from the list
+ * @typedef {{list: string, threshold: string}} FuzzyCommandArgs - arguments for /fuzzy command
+ * @example /fuzzy list=["down","left","up","right"] "he looks up" | /echo // should return "up"
+ * @link https://www.fusejs.io/
+ */
+function fuzzyCallback(args, searchInValue) {
+    if (!searchInValue) {
         console.warn('WARN: No argument provided for /fuzzy command');
         return '';
     }
@@ -517,14 +576,37 @@ function fuzzyCallback(args, value) {
             return '';
         }
 
-        const fuse = new Fuse(list, {
+        const params = {
             includeScore: true,
             findAllMatches: true,
             ignoreLocation: true,
-            threshold: 0.7,
-        });
-        const result = fuse.search(value);
-        return result[0]?.item;
+            threshold: 0.4,
+        };
+        // threshold determines how strict is the match, low threshold value is very strict, at 1 (nearly?) everything matches
+        if ('threshold' in args) {
+            params.threshold = parseFloat(resolveVariable(args.threshold));
+            if (isNaN(params.threshold)) {
+                console.warn('WARN: \'threshold\' argument must be a float between 0.0 and 1.0 for /fuzzy command');
+                return '';
+            }
+            if (params.threshold < 0) {
+                params.threshold = 0;
+            }
+            if (params.threshold > 1) {
+                params.threshold = 1;
+            }
+        }
+
+        const fuse = new Fuse([searchInValue], params);
+        // each item in the "list" is searched within "search_item", if any matches it returns the matched "item"
+        for (const searchItem of list) {
+            const result = fuse.search(searchItem);
+            if (result.length > 0) {
+                console.info('fuzzyCallback Matched: ' + searchItem);
+                return searchItem;
+            }
+        }
+        return '';
     } catch {
         console.warn('WARN: Invalid list argument provided for /fuzzy command');
         return '';
@@ -586,7 +668,8 @@ async function generateCallback(args, value) {
         }
 
         setEphemeralStopStrings(resolveVariable(args?.stop));
-        const result = await generateQuietPrompt(value, false, false, '');
+        const name = args?.name;
+        const result = await generateQuietPrompt(value, false, false, '', name);
         return result;
     } finally {
         if (lock) {
@@ -841,6 +924,38 @@ async function unhideMessageCallback(_, arg) {
     return '';
 }
 
+/**
+ * Copium for running group actions when the member is offscreen.
+ * @param {number} chid - character ID
+ * @param {string} action - one of 'enable', 'disable', 'up', 'down', 'view', 'remove'
+ * @returns {void}
+ */
+function performGroupMemberAction(chid, action) {
+    const memberSelector = `.group_member[chid="${chid}"]`;
+    // Do not optimize. Paginator gets recreated on every action
+    const paginationSelector = '#rm_group_members_pagination';
+    const pageSizeSelector = '#rm_group_members_pagination select';
+    let wasOffscreen = false;
+    let paginationValue = null;
+    let pageValue = null;
+
+    if ($(memberSelector).length === 0) {
+        wasOffscreen = true;
+        paginationValue = Number($(pageSizeSelector).val());
+        pageValue = $(paginationSelector).pagination('getCurrentPageNum');
+        $(pageSizeSelector).val($(pageSizeSelector).find('option').last().val()).trigger('change');
+    }
+
+    $(memberSelector).find(`[data-action="${action}"]`).trigger('click');
+
+    if (wasOffscreen) {
+        $(pageSizeSelector).val(paginationValue).trigger('change');
+        if ($(paginationSelector).length) {
+            $(paginationSelector).pagination('go', pageValue);
+        }
+    }
+}
+
 async function disableGroupMemberCallback(_, arg) {
     if (!selected_group) {
         toastr.warning('Cannot run /disable command outside of a group chat.');
@@ -854,7 +969,7 @@ async function disableGroupMemberCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="disable"]`).trigger('click');
+    performGroupMemberAction(chid, 'disable');
     return '';
 }
 
@@ -871,7 +986,7 @@ async function enableGroupMemberCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="enable"]`).trigger('click');
+    performGroupMemberAction(chid, 'enable');
     return '';
 }
 
@@ -888,7 +1003,7 @@ async function moveGroupMemberUpCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="up"]`).trigger('click');
+    performGroupMemberAction(chid, 'up');
     return '';
 }
 
@@ -905,7 +1020,7 @@ async function moveGroupMemberDownCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="down"]`).trigger('click');
+    performGroupMemberAction(chid, 'down');
     return '';
 }
 
@@ -927,7 +1042,7 @@ async function peekCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="view"]`).trigger('click');
+    performGroupMemberAction(chid, 'view');
     return '';
 }
 
@@ -949,7 +1064,7 @@ async function removeGroupMemberCallback(_, arg) {
         return '';
     }
 
-    $(`.group_member[chid="${chid}"] [data-action="remove"]`).trigger('click');
+    performGroupMemberAction(chid, 'remove');
     return '';
 }
 
@@ -995,8 +1110,9 @@ async function addGroupMemberCallback(_, arg) {
     return character.name;
 }
 
-async function triggerGenerationCallback(_, arg) {
-    setTimeout(async () => {
+async function triggerGenerationCallback(args, value) {
+    const shouldAwait = isTrueBoolean(args?.await);
+    const outerPromise = new Promise((outerResolve) => setTimeout(async () => {
         try {
             await waitUntilCondition(() => !is_send_press && !is_group_generating, 10000, 100);
         } catch {
@@ -1010,16 +1126,21 @@ async function triggerGenerationCallback(_, arg) {
 
         let chid = undefined;
 
-        if (selected_group && arg) {
-            chid = findGroupMemberId(arg);
+        if (selected_group && value) {
+            chid = findGroupMemberId(value);
 
             if (chid === undefined) {
-                console.warn(`WARN: No group member found for argument ${arg}`);
+                console.warn(`WARN: No group member found for argument ${value}`);
             }
         }
 
-        setTimeout(() => Generate('normal', { force_chid: chid }), 100);
-    }, 1);
+        outerResolve(new Promise(innerResolve => setTimeout(() => innerResolve(Generate('normal', { force_chid: chid })), 100)));
+    }, 1));
+
+    if (shouldAwait) {
+        const innerPromise = await outerPromise;
+        await innerPromise;
+    }
 
     return '';
 }
@@ -1079,6 +1200,12 @@ function findCharacterIndex(name) {
         (a, b) => a.includes(b),
     ];
 
+    const exactAvatarMatch = characters.findIndex(x => x.avatar === name);
+
+    if (exactAvatarMatch !== -1) {
+        return exactAvatarMatch;
+    }
+
     for (const matchType of matchTypes) {
         const index = characters.findIndex(x => matchType(x.name.toLowerCase(), name.toLowerCase()));
         if (index !== -1) {
@@ -1102,8 +1229,14 @@ async function goToCharacterCallback(_, name) {
         await openChat(new String(characterIndex));
         return characters[characterIndex]?.name;
     } else {
-        console.warn(`No matches found for name "${name}"`);
-        return '';
+        const group = groups.find(it => it.name.toLowerCase() == name.toLowerCase());
+        if (group) {
+            await openGroupById(group.id);
+            return group.name;
+        } else {
+            console.warn(`No matches found for name "${name}"`);
+            return '';
+        }
     }
 }
 
@@ -1114,7 +1247,7 @@ async function openChat(id) {
     await reloadCurrentChat();
 }
 
-function continueChatCallback() {
+function continueChatCallback(_, prompt) {
     setTimeout(async () => {
         try {
             await waitUntilCondition(() => !is_send_press && !is_group_generating, 10000, 100);
@@ -1125,7 +1258,7 @@ function continueChatCallback() {
 
         // Prevent infinite recursion
         $('#send_textarea').val('').trigger('input');
-        $('#option_continue').trigger('click', { fromSlashCommand: true });
+        $('#option_continue').trigger('click', { fromSlashCommand: true, additionalPrompt: prompt });
     }, 1);
 
     return '';
@@ -1227,7 +1360,7 @@ export async function sendMessageAs(args, text) {
 
     // Messages that do nothing but set bias will be hidden from the context
     const bias = extractMessageBias(mesText);
-    const isSystem = replaceBiasMarkup(mesText).trim().length === 0;
+    const isSystem = bias && !removeMacros(mesText).length;
 
     const character = characters.find(x => x.name === name);
     let force_avatar, original_avatar;
@@ -1280,7 +1413,7 @@ export async function sendNarratorMessage(args, text) {
     const name = chat_metadata[NARRATOR_NAME_KEY] || NARRATOR_NAME_DEFAULT;
     // Messages that do nothing but set bias will be hidden from the context
     const bias = extractMessageBias(text);
-    const isSystem = replaceBiasMarkup(text).trim().length === 0;
+    const isSystem = bias && !removeMacros(text).length;
 
     const message = {
         name: name,
@@ -1455,6 +1588,97 @@ function setBackgroundCallback(_, bg) {
 }
 
 /**
+ * Sets a model for the current API.
+ * @param {object} _ Unused
+ * @param {string} model Model name
+ * @returns {void}
+ */
+function modelCallback(_, model) {
+    if (!model) {
+        return;
+    }
+
+    console.log('Set model to ' + model);
+
+    const modelSelectMap = [
+        { id: 'model_togetherai_select', api: 'textgenerationwebui', type: textgen_types.TOGETHERAI },
+        { id: 'openrouter_model', api: 'textgenerationwebui', type: textgen_types.OPENROUTER },
+        { id: 'model_infermaticai_select', api: 'textgenerationwebui', type: textgen_types.INFERMATICAI },
+        { id: 'model_dreamgen_select', api: 'textgenerationwebui', type: textgen_types.DREAMGEN },
+        { id: 'mancer_model', api: 'textgenerationwebui', type: textgen_types.MANCER },
+        { id: 'aphrodite_model', api: 'textgenerationwebui', type: textgen_types.APHRODITE },
+        { id: 'ollama_model', api: 'textgenerationwebui', type: textgen_types.OLLAMA },
+        { id: 'model_openai_select', api: 'openai', type: chat_completion_sources.OPENAI },
+        { id: 'model_claude_select', api: 'openai', type: chat_completion_sources.CLAUDE },
+        { id: 'model_windowai_select', api: 'openai', type: chat_completion_sources.WINDOWAI },
+        { id: 'model_openrouter_select', api: 'openai', type: chat_completion_sources.OPENROUTER },
+        { id: 'model_ai21_select', api: 'openai', type: chat_completion_sources.AI21 },
+        { id: 'model_google_select', api: 'openai', type: chat_completion_sources.MAKERSUITE },
+        { id: 'model_mistralai_select', api: 'openai', type: chat_completion_sources.MISTRALAI },
+        { id: 'model_custom_select', api: 'openai', type: chat_completion_sources.CUSTOM },
+        { id: 'model_novel_select', api: 'novel', type: null },
+        { id: 'horde_model', api: 'koboldhorde', type: null },
+    ];
+
+    function getSubType() {
+        switch (main_api) {
+            case 'textgenerationwebui':
+                return textgenerationwebui_settings.type;
+            case 'openai':
+                return oai_settings.chat_completion_source;
+            default:
+                return null;
+        }
+    }
+
+    const apiSubType = getSubType();
+    const modelSelectItem = modelSelectMap.find(x => x.api == main_api && x.type == apiSubType)?.id;
+
+    if (!modelSelectItem) {
+        toastr.info('Setting a model for your API is not supported or not implemented yet.');
+        return;
+    }
+
+    const modelSelectControl = document.getElementById(modelSelectItem);
+
+    if (!(modelSelectControl instanceof HTMLSelectElement)) {
+        toastr.error(`Model select control not found: ${main_api}[${apiSubType}]`);
+        return;
+    }
+
+    const options = Array.from(modelSelectControl.options);
+
+    if (!options.length) {
+        toastr.warning('No model options found. Check your API settings.');
+        return;
+    }
+
+    let newSelectedOption = null;
+
+    const fuse = new Fuse(options, { keys: ['text', 'value'] });
+    const fuzzySearchResult = fuse.search(model);
+
+    const exactValueMatch = options.find(x => x.value.trim().toLowerCase() === model.trim().toLowerCase());
+    const exactTextMatch = options.find(x => x.text.trim().toLowerCase() === model.trim().toLowerCase());
+
+    if (exactValueMatch) {
+        newSelectedOption = exactValueMatch;
+    } else if (exactTextMatch) {
+        newSelectedOption = exactTextMatch;
+    } else if (fuzzySearchResult.length) {
+        newSelectedOption = fuzzySearchResult[0].item;
+    }
+
+    if (newSelectedOption) {
+        modelSelectControl.value = newSelectedOption.value;
+        $(modelSelectControl).trigger('change');
+        toastr.success(`Model set to "${newSelectedOption.text}"`);
+    } else {
+        toastr.warning(`No model found with name "${model}"`);
+    }
+}
+
+/**
  * Executes slash commands in the provided text
  * @param {string} text Slash command text
  * @param {boolean} unescape Whether to unescape the batch separator
@@ -1513,7 +1737,7 @@ async function executeSlashCommands(text, unescape = false) {
                     value = substituteParams(value.trim());
 
                     if (/{{pipe}}/i.test(value)) {
-                        value = value.replace(/{{pipe}}/i, pipeResult || '');
+                        value = value.replace(/{{pipe}}/i, pipeResult ?? '');
                     }
 
                     result.args[key] = value;
@@ -1521,8 +1745,24 @@ async function executeSlashCommands(text, unescape = false) {
             }
         }
 
-        if (typeof unnamedArg === 'string' && /{{pipe}}/i.test(unnamedArg)) {
-            unnamedArg = unnamedArg.replace(/{{pipe}}/i, pipeResult || '');
+        if (typeof unnamedArg === 'string') {
+            if (/{{pipe}}/i.test(unnamedArg)) {
+                unnamedArg = unnamedArg.replace(/{{pipe}}/i, pipeResult ?? '');
+            }
+
+            unnamedArg = unnamedArg
+                ?.replace(/\\\|/g, '|')
+                ?.replace(/\\\{/g, '{')
+                ?.replace(/\\\}/g, '}');
+        }
+
+        for (const [key, value] of Object.entries(result.args)) {
+            if (typeof value === 'string') {
+                result.args[key] = value
+                    .replace(/\\\|/g, '|')
+                    .replace(/\\\{/g, '{')
+                    .replace(/\\\}/g, '}');
+            }
         }
 
         pipeResult = await result.command.callback(result.args, unnamedArg);

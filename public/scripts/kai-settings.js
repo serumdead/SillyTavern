@@ -4,7 +4,6 @@ import {
     getStoppingStrings,
     substituteParams,
     api_server,
-    main_api,
 } from '../script.js';
 
 import {
@@ -129,13 +128,6 @@ export function getKoboldGenerationData(finalPrompt, settings, maxLength, maxCon
         top_p: kai_settings.top_p,
         min_p: (kai_flags.can_use_min_p || isHorde) ? kai_settings.min_p : undefined,
         typical: kai_settings.typical,
-        s1: sampler_order[0],
-        s2: sampler_order[1],
-        s3: sampler_order[2],
-        s4: sampler_order[3],
-        s5: sampler_order[4],
-        s6: sampler_order[5],
-        s7: sampler_order[6],
         use_world_info: false,
         singleline: false,
         stop_sequence: (kai_flags.can_use_stop_sequence || isHorde) ? getStoppingStrings(isImpersonate, isContinue) : undefined,
@@ -149,7 +141,6 @@ export function getKoboldGenerationData(finalPrompt, settings, maxLength, maxCon
         sampler_seed: kai_settings.seed >= 0 ? kai_settings.seed : undefined,
 
         api_server,
-        main_api,
     };
     return generate_data;
 }
@@ -173,7 +164,7 @@ function tryParseStreamingError(response, decoded) {
 }
 
 export async function generateKoboldWithStreaming(generate_data, signal) {
-    const response = await fetch('/generate', {
+    const response = await fetch('/api/backends/kobold/generate', {
         headers: getRequestHeaders(),
         body: JSON.stringify(generate_data),
         method: 'POST',
@@ -317,6 +308,11 @@ const sliders = [
     },
 ];
 
+/**
+ * Sets the supported feature flags for the KoboldAI backend.
+ * @param {string} koboldUnitedVersion Kobold United version
+ * @param {string} koboldCppVersion KoboldCPP version
+ */
 export function setKoboldFlags(koboldUnitedVersion, koboldCppVersion) {
     kai_flags.can_use_stop_sequence = versionCompare(koboldUnitedVersion, MIN_STOP_SEQUENCE_VERSION);
     kai_flags.can_use_streaming = versionCompare(koboldCppVersion, MIN_STREAMING_KCPPVERSION);
@@ -325,6 +321,8 @@ export function setKoboldFlags(koboldUnitedVersion, koboldCppVersion) {
     kai_flags.can_use_mirostat = versionCompare(koboldCppVersion, MIN_MIROSTAT_KCPPVERSION);
     kai_flags.can_use_grammar = versionCompare(koboldCppVersion, MIN_GRAMMAR_KCPPVERSION);
     kai_flags.can_use_min_p = versionCompare(koboldCppVersion, MIN_MIN_P_KCPPVERSION);
+    const isKoboldCpp = versionCompare(koboldCppVersion, '1.0.0');
+    $('#koboldcpp_hint').toggleClass('displayNone', !isKoboldCpp);
 }
 
 /**

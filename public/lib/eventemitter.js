@@ -49,7 +49,11 @@ EventEmitter.prototype.removeListener = function (event, listener) {
 };
 
 EventEmitter.prototype.emit = async function (event) {
-    console.debug('Event emitted: ' + event);
+    if (localStorage.getItem('eventTracing') === 'true') {
+        console.trace('Event emitted: ' + event);
+    } else {
+        console.debug('Event emitted: ' + event);
+    }
 
     var i, listeners, length, args = [].slice.call(arguments, 1);
 
@@ -60,6 +64,31 @@ EventEmitter.prototype.emit = async function (event) {
         for (i = 0; i < length; i++) {
             try {
                 await listeners[i].apply(this, args);
+            }
+            catch (err) {
+                console.error(err);
+                console.trace('Error in event listener');
+            }
+        }
+    }
+};
+
+EventEmitter.prototype.emitAndWait = function (event) {
+    if (localStorage.getItem('eventTracing') === 'true') {
+        console.trace('Event emitted: ' + event);
+    } else {
+        console.debug('Event emitted: ' + event);
+    }
+
+    var i, listeners, length, args = [].slice.call(arguments, 1);
+
+    if (typeof this.events[event] === 'object') {
+        listeners = this.events[event].slice();
+        length = listeners.length;
+
+        for (i = 0; i < length; i++) {
+            try {
+                listeners[i].apply(this, args);
             }
             catch (err) {
                 console.error(err);

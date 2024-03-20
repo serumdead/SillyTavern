@@ -12,8 +12,16 @@ export const SECRET_KEYS = {
     SCALE: 'api_key_scale',
     AI21: 'api_key_ai21',
     SCALE_COOKIE: 'scale_cookie',
-    PALM: 'api_key_palm',
+    MAKERSUITE: 'api_key_makersuite',
     SERPAPI: 'api_key_serpapi',
+    MISTRALAI: 'api_key_mistralai',
+    TOGETHERAI: 'api_key_togetherai',
+    INFERMATICAI: 'api_key_infermaticai',
+    DREAMGEN: 'api_key_dreamgen',
+    CUSTOM: 'api_key_custom',
+    OOBA: 'api_key_ooba',
+    NOMICAI: 'api_key_nomicai',
+    KOBOLDCPP: 'api_key_koboldcpp',
 };
 
 const INPUT_MAP = {
@@ -22,13 +30,21 @@ const INPUT_MAP = {
     [SECRET_KEYS.OPENAI]: '#api_key_openai',
     [SECRET_KEYS.NOVEL]: '#api_key_novel',
     [SECRET_KEYS.CLAUDE]: '#api_key_claude',
-    [SECRET_KEYS.OPENROUTER]: '#api_key_openrouter',
+    [SECRET_KEYS.OPENROUTER]: '.api_key_openrouter',
     [SECRET_KEYS.SCALE]: '#api_key_scale',
     [SECRET_KEYS.AI21]: '#api_key_ai21',
     [SECRET_KEYS.SCALE_COOKIE]: '#scale_cookie',
-    [SECRET_KEYS.PALM]: '#api_key_palm',
+    [SECRET_KEYS.MAKERSUITE]: '#api_key_makersuite',
     [SECRET_KEYS.APHRODITE]: '#api_key_aphrodite',
     [SECRET_KEYS.TABBY]: '#api_key_tabby',
+    [SECRET_KEYS.MISTRALAI]: '#api_key_mistralai',
+    [SECRET_KEYS.CUSTOM]: '#api_key_custom',
+    [SECRET_KEYS.TOGETHERAI]: '#api_key_togetherai',
+    [SECRET_KEYS.OOBA]: '#api_key_ooba',
+    [SECRET_KEYS.INFERMATICAI]: '#api_key_infermaticai',
+    [SECRET_KEYS.DREAMGEN]: '#api_key_dreamgen',
+    [SECRET_KEYS.NOMICAI]: '#api_key_nomicai',
+    [SECRET_KEYS.KOBOLDCPP]: '#api_key_koboldcpp',
 };
 
 async function clearSecret() {
@@ -36,7 +52,7 @@ async function clearSecret() {
     await writeSecret(key, '');
     secret_state[key] = false;
     updateSecretDisplay();
-    $(INPUT_MAP[key]).val('');
+    $(INPUT_MAP[key]).val('').trigger('input');
     $('#main_api').trigger('change');
 }
 
@@ -116,6 +132,11 @@ export async function readSecretState() {
     }
 }
 
+/**
+ * Finds a secret value by key.
+ * @param {string} key Secret key
+ * @returns {Promise<string | undefined>} Secret value, or undefined if keys are not exposed
+ */
 export async function findSecret(key) {
     try {
         const response = await fetch('/api/secrets/find', {
@@ -184,5 +205,5 @@ jQuery(async () => {
         const warningElement = $(`[data-for="${id}"]`);
         warningElement.toggle(value.length > 0);
     });
-    $('#openrouter_authorize').on('click', authorizeOpenRouter);
+    $('.openrouter_authorize').on('click', authorizeOpenRouter);
 });

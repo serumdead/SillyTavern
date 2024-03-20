@@ -69,7 +69,7 @@ import {
     loadItemizedPrompts,
     animation_duration,
 } from '../script.js';
-import { appendTagToList, createTagMapFromList, getTagsList, applyTagsOnCharacterSelect, tag_map } from './tags.js';
+import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
 
 export {
@@ -108,11 +108,20 @@ export const group_activation_strategy = {
 export const group_generation_mode = {
     SWAP: 0,
     APPEND: 1,
+    APPEND_DISABLED: 2,
 };
 
+const DEFAULT_AUTO_MODE_DELAY = 5;
+
 export const groupCandidatesFilter = new FilterHelper(debounce(printGroupCandidates, 100));
-setInterval(groupChatAutoModeWorker, 5000);
+let autoModeWorker = null;
 const saveGroupDebounced = debounce(async (group, reload) => await _save(group, reload), 500);
+
+function setAutoModeWorker() {
+    clearInterval(autoModeWorker);
+    const autoModeDelay = groups.find(x => x.id === selected_group)?.auto_mode_delay ?? DEFAULT_AUTO_MODE_DELAY;
+    autoModeWorker = setInterval(groupChatAutoModeWorker, autoModeDelay * 1000);
+}
 
 async function _save(group, reload = true) {
     await fetch('/api/groups/edit', {
@@ -188,7 +197,7 @@ export async function getGroupChat(groupId) {
                     continue;
                 }
 
-                const mes = getFirstCharacterMessage(character);
+                const mes = await getFirstCharacterMessage(character);
                 chat.push(mes);
                 addOneMessage(mes);
             }
@@ -317,7 +326,7 @@ export function getGroupDepthPrompts(groupId, characterId) {
 }
 
 /**
- * Combines group members info a single string. Only for groups with generation mode set to APPEND.
+ * Combines group members cards into a single string. Only for groups with generation mode set to APPEND or APPEND_DISABLED.
  * @param {string} groupId Group ID
  * @param {number} characterId Current Character ID
  * @returns {{description: string, personality: string, scenario: string, mesExamples: string}} Group character cards combined
@@ -326,7 +335,7 @@ export function getGroupCharacterCards(groupId, characterId) {
     console.debug('getGroupCharacterCards entered for group: ', groupId);
     const group = groups.find(x => x.id === groupId);
 
-    if (!group || group?.generation_mode !== group_generation_mode.APPEND || !Array.isArray(group.members) || !group.members.length) {
+    if (!group || !group?.generation_mode || !Array.isArray(group.members) || !group.members.length) {
         return null;
     }
 
@@ -346,7 +355,7 @@ export function getGroupCharacterCards(groupId, characterId) {
             continue;
         }
 
-        if (group.disabled_members.includes(member) && characterId !== index) {
+        if (group.disabled_members.includes(member) && characterId !== index && group.generation_mode !== group_generation_mode.APPEND_DISABLED) {
             console.debug(`Skipping disabled group member: ${member}`);
             continue;
         }
@@ -365,13 +374,20 @@ export function getGroupCharacterCards(groupId, characterId) {
     return { description, personality, scenario, mesExamples };
 }
 
-function getFirstCharacterMessage(character) {
+async function getFirstCharacterMessage(character) {
     let messageText = character.first_mes;
 
     // if there are alternate greetings, pick one at random
     if (Array.isArray(character.data?.alternate_greetings)) {
         const messageTexts = [character.first_mes, ...character.data.alternate_greetings].filter(x => x);
         messageText = messageTexts[Math.floor(Math.random() * messageTexts.length)];
+    }
+
+    // Allow extensions to change the first message
+    const eventArgs = { input: messageText, output: '', character: character };
+    await eventSource.emit(event_types.CHARACTER_FIRST_MESSAGE_SELECTED, eventArgs);
+    if (eventArgs.output) {
+        messageText = eventArgs.output;
     }
 
     const mes = {};
@@ -514,18 +530,33 @@ async function getGroups() {
 }
 
 export function getGroupBlock(group) {
+    let count = 0;
+    let namesList = [];
+
+    // Build inline name list
+    if (Array.isArray(group.members) && group.members.length) {
+        for (const member of group.members) {
+            const character = characters.find(x => x.avatar === member || x.name === member);
+            if (character) {
+                namesList.push(character.name);
+                count++;
+            }
+        }
+    }
+
     const template = $('#group_list_template .group_select').clone();
     template.data('id', group.id);
     template.attr('grid', group.id);
-    template.find('.ch_name').text(group.name);
+    template.find('.ch_name').text(group.name).attr('title', `[Group] ${group.name}`);
     template.find('.group_fav_icon').css('display', 'none');
     template.addClass(group.fav ? 'is_fav' : '');
     template.find('.ch_fav').val(group.fav);
+    template.find('.group_select_counter').text(`${count} ${count != 1 ? 'characters' : 'character'}`);
+    template.find('.group_select_block_list').text(namesList.join(', '));
 
     // Display inline tags
-    const tags = getTagsList(group.id);
     const tagsElement = template.find('.tags');
-    tags.forEach(tag => appendTagToList(tagsElement, tag, {}));
+    printTagList(tagsElement, { forEntityOrKey: group.id });
 
     const avatar = getGroupAvatar(group);
     if (avatar) {
@@ -543,6 +574,8 @@ function updateGroupAvatar(group) {
             $(this).find('.avatar').replaceWith(getGroupAvatar(group));
         }
     });
+
+    favsToHotswap();
 }
 
 // check if isDataURLor if it's a valid local file url
@@ -560,7 +593,7 @@ function getGroupAvatar(group) {
     }
     // if isDataURL or if it's a valid local file url
     if (isValidImageUrl(group.avatar_url)) {
-        return $(`<div class="avatar"><img src="${group.avatar_url}"></div>`);
+        return $(`<div class="avatar" title="[Group] ${group.name}"><img src="${group.avatar_url}"></div>`);
     }
 
     const memberAvatars = [];
@@ -586,12 +619,19 @@ function getGroupAvatar(group) {
             groupAvatar.find(`.img_${i + 1}`).attr('src', memberAvatars[i]);
         }
 
+        groupAvatar.attr('title', `[Group] ${group.name}`);
         return groupAvatar;
+    }
+
+    // catch edge case where group had one member and that member is deleted
+    if (avatarCount === 0) {
+        return $('<div class="missing-avatar fa-solid fa-user-slash"></div>');
     }
 
     // default avatar
     const groupAvatar = $('#group_avatars_template .collage_1').clone();
     groupAvatar.find('.img_1').attr('src', group.avatar_url || system_avatar);
+    groupAvatar.attr('title', `[Group] ${group.name}`);
     return groupAvatar;
 }
 
@@ -721,6 +761,7 @@ async function generateGroupWrapper(by_auto_mode, type = null, params = {}) {
             const generateType = type == 'swipe' || type == 'impersonate' || type == 'quiet' || type == 'continue' ? type : 'group_chat';
             setCharacterId(chId);
             setCharacterName(characters[chId].name);
+            await eventSource.emit(event_types.GROUP_MEMBER_DRAFTED, chId);
 
             if (type !== 'swipe' && type !== 'impersonate' && !isStreamingEnabled()) {
                 // update indicator and scroll down
@@ -1035,6 +1076,15 @@ async function onGroupGenerationModeInput(e) {
     }
 }
 
+async function onGroupAutoModeDelayInput(e) {
+    if (openGroupId) {
+        let _thisGroup = groups.find((x) => x.id == openGroupId);
+        _thisGroup.auto_mode_delay = Number(e.target.value);
+        await editGroup(openGroupId, false, false);
+        setAutoModeWorker();
+    }
+}
+
 async function onGroupNameInput() {
     if (openGroupId) {
         let _thisGroup = groups.find((x) => x.id == openGroupId);
@@ -1091,7 +1141,7 @@ function printGroupCandidates() {
         showNavigator: true,
         showSizeChanger: true,
         pageSize: Number(localStorage.getItem(storageKey)) || 5,
-        sizeChangerOptions: [5, 10, 25, 50, 100, 200],
+        sizeChangerOptions: [5, 10, 25, 50, 100, 200, 500, 1000],
         afterSizeSelectorChange: function (e) {
             localStorage.setItem(storageKey, e.target.value);
         },
@@ -1118,7 +1168,7 @@ function printGroupMembers() {
             showNavigator: true,
             showSizeChanger: true,
             pageSize: Number(localStorage.getItem(storageKey)) || 5,
-            sizeChangerOptions: [5, 10, 25, 50, 100, 200],
+            sizeChangerOptions: [5, 10, 25, 50, 100, 200, 500, 1000],
             afterSizeSelectorChange: function (e) {
                 localStorage.setItem(storageKey, e.target.value);
             },
@@ -1145,9 +1195,8 @@ function getGroupCharacterBlock(character) {
     template.toggleClass('disabled', isGroupMemberDisabled(character.avatar));
 
     // Display inline tags
-    const tags = getTagsList(character.avatar);
     const tagsElement = template.find('.tags');
-    tags.forEach(tag => appendTagToList(tagsElement, tag, {}));
+    printTagList(tagsElement, { forEntityOrKey: characters.indexOf(character) });
 
     if (!openGroupId) {
         template.find('[data-action="speak"]').hide();
@@ -1223,6 +1272,9 @@ function select_group_chats(groupId, skipAnimation) {
         selectRightMenuWithAnimation('rm_group_chats_block');
     }
 
+    // render tags
+    printTagList($('#groupTagList'), { forEntityOrKey: groupId, tagOptions: { removable: true } });
+
     // render characters list
     printGroupCandidates();
     printGroupMembers();
@@ -1231,6 +1283,7 @@ function select_group_chats(groupId, skipAnimation) {
     $('#rm_group_submit').prop('disabled', !groupHasMembers);
     $('#rm_group_allow_self_responses').prop('checked', group && group.allow_self_responses);
     $('#rm_group_hidemutedsprites').prop('checked', group && group.hideMutedSprites);
+    $('#rm_group_automode_delay').val(group?.auto_mode_delay ?? DEFAULT_AUTO_MODE_DELAY);
 
     // bottom buttons
     if (openGroupId) {
@@ -1249,6 +1302,7 @@ function select_group_chats(groupId, skipAnimation) {
     }
 
     updateFavButtonState(group?.fav ?? false);
+    setAutoModeWorker();
 
     // top bar
     if (group) {
@@ -1441,6 +1495,7 @@ async function createGroup() {
     let allowSelfResponses = !!$('#rm_group_allow_self_responses').prop('checked');
     let activationStrategy = Number($('#rm_group_activation_strategy').find(':selected').val()) ?? group_activation_strategy.NATURAL;
     let generationMode = Number($('#rm_group_generation_mode').find(':selected').val()) ?? group_generation_mode.SWAP;
+    let autoModeDelay = Number($('#rm_group_automode_delay').val()) ?? DEFAULT_AUTO_MODE_DELAY;
     const members = newGroupMembers;
     const memberNames = characters.filter(x => members.includes(x.avatar)).map(x => x.name).join(', ');
 
@@ -1469,6 +1524,7 @@ async function createGroup() {
             fav: fav_grp_checked,
             chat_id: chatName,
             chats: chats,
+            auto_mode_delay: autoModeDelay,
         }),
     });
 
@@ -1599,7 +1655,7 @@ export async function deleteGroupChat(groupId, chatId) {
 
     if (response.ok) {
         if (group.chats.length) {
-            await openGroupChat(groupId, group.chats[0]);
+            await openGroupChat(groupId, group.chats[group.chats.length - 1]);
         } else {
             await createNewGroupChat(groupId);
         }
@@ -1716,7 +1772,7 @@ function doCurMemberListPopout() {
 
 jQuery(() => {
     $(document).on('click', '.group_select', function () {
-        const groupId = $(this).data('id');
+        const groupId = $(this).attr('chid') || $(this).attr('grid') || $(this).data('id');
         openGroupById(groupId);
     });
     $('#rm_group_filter').on('input', filterGroupMembers);
@@ -1741,6 +1797,7 @@ jQuery(() => {
     $('#rm_group_allow_self_responses').on('input', onGroupSelfResponsesClick);
     $('#rm_group_activation_strategy').on('change', onGroupActivationStrategyInput);
     $('#rm_group_generation_mode').on('change', onGroupGenerationModeInput);
+    $('#rm_group_automode_delay').on('input', onGroupAutoModeDelayInput);
     $('#group_avatar_button').on('input', uploadGroupAvatar);
     $('#rm_group_restore_avatar').on('click', restoreGroupAvatar);
     $(document).on('click', '.group_member .right_menu_button', onGroupActionClick);

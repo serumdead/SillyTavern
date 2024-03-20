@@ -1,6 +1,6 @@
 import { callPopup, eventSource, event_types, saveSettings, saveSettingsDebounced, getRequestHeaders, substituteParams, renderTemplate, animation_duration } from '../script.js';
 import { hideLoader, showLoader } from './loader.js';
-import { isSubsetOf } from './utils.js';
+import { isSubsetOf, setValueByPath } from './utils.js';
 export {
     getContext,
     getApiUrl,
@@ -17,6 +17,8 @@ let manifests = {};
 const defaultUrl = 'http://localhost:5100';
 
 let saveMetadataTimeout = null;
+
+let requiresReload = false;
 
 export function saveMetadataDebounced() {
     const context = getContext();
@@ -47,8 +49,6 @@ export function saveMetadataDebounced() {
     }, 1000);
 }
 
-export const extensionsHandlebars = Handlebars.create();
-
 /**
  * Provides an ability for extensions to render HTML templates.
  * Templates sanitation and localization is forced.
@@ -59,40 +59,6 @@ export const extensionsHandlebars = Handlebars.create();
  */
 export function renderExtensionTemplate(extensionName, templateId, templateData = {}, sanitize = true, localize = true) {
     return renderTemplate(`scripts/extensions/${extensionName}/${templateId}.html`, templateData, sanitize, localize, true);
-}
-
-/**
- * Registers a Handlebars helper for use in extensions.
- * @param {string} name Handlebars helper name
- * @param {function} helper Handlebars helper function
- */
-export function registerExtensionHelper(name, helper) {
-    extensionsHandlebars.registerHelper(name, helper);
-}
-
-/**
- * Applies handlebars extension helpers to a message.
- * @param {number} messageId Message index in the chat.
- */
-export function processExtensionHelpers(messageId) {
-    const context = getContext();
-    const message = context.chat[messageId];
-
-    if (!message?.mes || typeof message.mes !== 'string') {
-        return;
-    }
-
-    // Don't waste time if there are no mustaches
-    if (!substituteParams(message.mes).includes('{{')) {
-        return;
-    }
-
-    try {
-        const template = extensionsHandlebars.compile(substituteParams(message.mes), { noEscape: true });
-        message.mes = template({});
-    } catch {
-        // Ignore
-    }
 }
 
 // Disables parallel updates
@@ -146,6 +112,7 @@ const extension_settings = {
     sd: {
         prompts: {},
         character_prompts: {},
+        character_negative_prompts: {},
     },
     chromadb: {},
     translate: {},
@@ -200,9 +167,12 @@ async function doExtrasFetch(endpoint, args) {
     if (!args.headers) {
         args.headers = {};
     }
-    Object.assign(args.headers, {
-        'Authorization': `Bearer ${extension_settings.apiKey}`,
-    });
+
+    if (extension_settings.apiKey) {
+        Object.assign(args.headers, {
+            'Authorization': `Bearer ${extension_settings.apiKey}`,
+        });
+    }
 
     const response = await fetch(endpoint, args);
     return response;
@@ -228,24 +198,32 @@ async function discoverExtensions() {
 
 function onDisableExtensionClick() {
     const name = $(this).data('name');
-    disableExtension(name);
+    disableExtension(name, false);
 }
 
 function onEnableExtensionClick() {
     const name = $(this).data('name');
-    enableExtension(name);
+    enableExtension(name, false);
 }
 
-async function enableExtension(name) {
+async function enableExtension(name, reload = true) {
     extension_settings.disabledExtensions = extension_settings.disabledExtensions.filter(x => x !== name);
     await saveSettings();
-    location.reload();
+    if (reload) {
+        location.reload();
+    } else {
+        requiresReload = true;
+    }
 }
 
-async function disableExtension(name) {
+async function disableExtension(name, reload = true) {
     extension_settings.disabledExtensions.push(name);
     await saveSettings();
-    location.reload();
+    if (reload) {
+        location.reload();
+    } else {
+        requiresReload = true;
+    }
 }
 
 async function getManifests(names) {
@@ -595,6 +573,7 @@ function getModuleInformation() {
  * Generates the HTML strings for all extensions and displays them in a popup.
  */
 async function showExtensionsDetails() {
+    let popupPromise;
     try {
         showLoader();
         let htmlDefault = '<h3>Built-in Extensions:</h3>';
@@ -625,12 +604,19 @@ async function showExtensionsDetails() {
             ${htmlDefault}
             ${htmlExternal}
         `;
-        callPopup(`<div class="extensions_info">${html}</div>`, 'text');
+        popupPromise = callPopup(`<div class="extensions_info">${html}</div>`, 'text', '', { okButton: 'Close', wide: true, large: true });
     } catch (error) {
         toastr.error('Error loading extensions. See browser console for details.');
         console.error(error);
     } finally {
         hideLoader();
+    }
+    if (popupPromise) {
+        await popupPromise;
+    }
+    if (requiresReload) {
+        showLoader();
+        location.reload();
     }
 }
 
@@ -671,7 +657,7 @@ async function updateExtension(extensionName, quiet) {
                 toastr.success('Extension is already up to date');
             }
         } else {
-            toastr.success(`Extension ${extensionName} updated to ${data.shortCommitHash}`);
+            toastr.success(`Extension ${extensionName} updated to ${data.shortCommitHash}`, 'Reload the page to apply updates');
         }
     } catch (error) {
         console.error('Error:', error);
@@ -879,7 +865,7 @@ async function runGenerationInterceptors(chat, contextSize) {
         exitImmediately = immediately;
     };
 
-    for (const manifest of Object.values(manifests)) {
+    for (const manifest of Object.values(manifests).sort((a, b) => a.loading_order - b.loading_order)) {
         const interceptorKey = manifest.generate_interceptor;
         if (typeof window[interceptorKey] === 'function') {
             try {
@@ -895,6 +881,55 @@ async function runGenerationInterceptors(chat, contextSize) {
     }
 
     return aborted;
+}
+
+/**
+ * Writes a field to the character's data extensions object.
+ * @param {number} characterId Index in the character array
+ * @param {string} key Field name
+ * @param {any} value Field value
+ * @returns {Promise<void>} When the field is written
+ */
+export async function writeExtensionField(characterId, key, value) {
+    const context = getContext();
+    const character = context.characters[characterId];
+    if (!character) {
+        console.warn('Character not found', characterId);
+        return;
+    }
+    const path = `data.extensions.${key}`;
+    setValueByPath(character, path, value);
+
+    // Process JSON data
+    if (character.json_data) {
+        const jsonData = JSON.parse(character.json_data);
+        setValueByPath(jsonData, path, value);
+        character.json_data = JSON.stringify(jsonData);
+
+        // Make sure the data doesn't get lost when saving the current character
+        if (Number(characterId) === Number(context.characterId)) {
+            $('#character_json_data').val(character.json_data);
+        }
+    }
+
+    // Save data to the server
+    const saveDataRequest = {
+        avatar: character.avatar,
+        data: {
+            extensions: {
+                [key]: value,
+            },
+        },
+    };
+    const mergeResponse = await fetch('/api/characters/merge-attributes', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(saveDataRequest),
+    });
+
+    if (!mergeResponse.ok) {
+        console.error('Failed to save extension field', mergeResponse.statusText);
+    }
 }
 
 jQuery(function () {
