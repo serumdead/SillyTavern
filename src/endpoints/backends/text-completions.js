@@ -4,7 +4,7 @@ const _ = require('lodash');
 const Readable = require('stream').Readable;
 
 const { jsonParser } = require('../../express-common');
-const { TEXTGEN_TYPES, TOGETHERAI_KEYS, OLLAMA_KEYS, INFERMATICAI_KEYS, OPENROUTER_KEYS, DREAMGEN_KEYS } = require('../../constants');
+const { TEXTGEN_TYPES, TOGETHERAI_KEYS, OLLAMA_KEYS, INFERMATICAI_KEYS, OPENROUTER_KEYS, VLLM_KEYS, DREAMGEN_KEYS } = require('../../constants');
 const { forwardFetchResponse, trimV1 } = require('../../util');
 const { setAdditionalHeaders } = require('../../additional-headers');
 
@@ -103,6 +103,7 @@ router.post('/status', jsonParser, async function (request, response) {
         } else {
             switch (request.body.api_type) {
                 case TEXTGEN_TYPES.OOBA:
+                case TEXTGEN_TYPES.VLLM:
                 case TEXTGEN_TYPES.APHRODITE:
                 case TEXTGEN_TYPES.KOBOLDCPP:
                 case TEXTGEN_TYPES.LLAMACPP:
@@ -233,6 +234,7 @@ router.post('/generate', jsonParser, async function (request, response) {
             url += '/v1/generate';
         } else {
             switch (request.body.api_type) {
+                case TEXTGEN_TYPES.VLLM:
                 case TEXTGEN_TYPES.APHRODITE:
                 case TEXTGEN_TYPES.OOBA:
                 case TEXTGEN_TYPES.TABBY:
@@ -287,7 +289,20 @@ router.post('/generate', jsonParser, async function (request, response) {
         }
 
         if (request.body.api_type === TEXTGEN_TYPES.OPENROUTER) {
+            if (Array.isArray(request.body.provider) && request.body.provider.length > 0) {
+                request.body.provider = {
+                    allow_fallbacks: true,
+                    order: request.body.provider,
+                };
+            } else {
+                delete request.body.provider;
+            }
             request.body = _.pickBy(request.body, (_, key) => OPENROUTER_KEYS.includes(key));
+            args.body = JSON.stringify(request.body);
+        }
+
+        if (request.body.api_type === TEXTGEN_TYPES.VLLM) {
+            request.body = _.pickBy(request.body, (_, key) => VLLM_KEYS.includes(key));
             args.body = JSON.stringify(request.body);
         }
 
@@ -325,7 +340,7 @@ router.post('/generate', jsonParser, async function (request, response) {
 
                 // Map InfermaticAI response to OAI completions format
                 if (apiType === TEXTGEN_TYPES.INFERMATICAI) {
-                    data['choices'] = (data?.choices || []).map(choice => ({ text: choice.message.content }));
+                    data['choices'] = (data?.choices || []).map(choice => ({ text: choice?.message?.content || choice.text }));
                 }
 
                 return response.send(data);
@@ -466,6 +481,88 @@ llamacpp.post('/caption-image', jsonParser, async function (request, response) {
         }
 
         return response.send({ caption });
+
+    } catch (error) {
+        console.error(error);
+        return response.status(500);
+    }
+});
+
+llamacpp.post('/props', jsonParser, async function (request, response) {
+    try {
+        if (!request.body.server_url) {
+            return response.sendStatus(400);
+        }
+
+        console.log('LlamaCpp props request:', request.body);
+        const baseUrl = trimV1(request.body.server_url);
+
+        const fetchResponse = await fetch(`${baseUrl}/props`, {
+            method: 'GET',
+            timeout: 0,
+        });
+
+        if (!fetchResponse.ok) {
+            console.log('LlamaCpp props error:', fetchResponse.status, fetchResponse.statusText);
+            return response.status(500).send({ error: true });
+        }
+
+        const data = await fetchResponse.json();
+        console.log('LlamaCpp props response:', data);
+
+        return response.send(data);
+
+    } catch (error) {
+        console.error(error);
+        return response.status(500);
+    }
+});
+
+llamacpp.post('/slots', jsonParser, async function (request, response) {
+    try {
+        if (!request.body.server_url) {
+            return response.sendStatus(400);
+        }
+        if (!/^(erase|info|restore|save)$/.test(request.body.action)) {
+            return response.sendStatus(400);
+        }
+
+        console.log('LlamaCpp slots request:', request.body);
+        const baseUrl = trimV1(request.body.server_url);
+
+        let fetchResponse;
+        if (request.body.action === 'info') {
+            fetchResponse = await fetch(`${baseUrl}/slots`, {
+                method: 'GET',
+                timeout: 0,
+            });
+        } else {
+            if (!/^\d+$/.test(request.body.id_slot)) {
+                return response.sendStatus(400);
+            }
+            if (request.body.action !== 'erase' && !request.body.filename) {
+                return response.sendStatus(400);
+            }
+
+            fetchResponse = await fetch(`${baseUrl}/slots/${request.body.id_slot}?action=${request.body.action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 0,
+                body: JSON.stringify({
+                    filename: request.body.action !== 'erase' ? `${request.body.filename}` : undefined,
+                }),
+            });
+        }
+
+        if (!fetchResponse.ok) {
+            console.log('LlamaCpp slots error:', fetchResponse.status, fetchResponse.statusText);
+            return response.status(500).send({ error: true });
+        }
+
+        const data = await fetchResponse.json();
+        console.log('LlamaCpp slots response:', data);
+
+        return response.send(data);
 
     } catch (error) {
         console.error(error);

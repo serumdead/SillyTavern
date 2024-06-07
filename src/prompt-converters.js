@@ -1,5 +1,8 @@
+require('./polyfill.js');
+
 /**
  * Convert a prompt from the ChatML objects to the format used by Claude.
+ * Mainly deprecated. Only used for counting tokens.
  * @param {object[]} messages Array of messages
  * @param {boolean}  addAssistantPostfix Add Assistant postfix.
  * @param {string}   addAssistantPrefill Add Assistant prefill after the assistant postfix.
@@ -89,11 +92,16 @@ function convertClaudeMessages(messages, prefillString, useSysPrompt, humanMsgFi
             if (messages[i].role !== 'system') {
                 break;
             }
+            // Append example names if not already done by the frontend (e.g. for group chats).
             if (userName && messages[i].name === 'example_user') {
-                messages[i].content = `${userName}: ${messages[i].content}`;
+                if (!messages[i].content.startsWith(`${userName}: `)) {
+                    messages[i].content = `${userName}: ${messages[i].content}`;
+                }
             }
             if (charName && messages[i].name === 'example_assistant') {
-                messages[i].content = `${charName}: ${messages[i].content}`;
+                if (!messages[i].content.startsWith(`${charName}: `)) {
+                    messages[i].content = `${charName}: ${messages[i].content}`;
+                }
             }
             systemPrompt += `${messages[i].content}\n\n`;
         }
@@ -184,65 +192,238 @@ function convertClaudeMessages(messages, prefillString, useSysPrompt, humanMsgFi
 }
 
 /**
- * Convert a prompt from the ChatML objects to the format used by Google MakerSuite models.
+ * Convert a prompt from the ChatML objects to the format used by Cohere.
  * @param {object[]} messages Array of messages
- * @param {string} model Model name
- * @returns {object[]} Prompt for Google MakerSuite models
+ * @param {string}   charName Character name
+ * @param {string}   userName User name
+ * @returns {{systemPrompt: string, chatHistory: object[], userPrompt: string}} Prompt for Cohere
  */
-function convertGooglePrompt(messages, model) {
-    // This is a 1x1 transparent PNG
-    const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-    const contents = [];
-    let lastRole = '';
-    let currentText = '';
+function convertCohereMessages(messages, charName = '', userName = '') {
+    const roleMap = {
+        'system': 'SYSTEM',
+        'user': 'USER',
+        'assistant': 'CHATBOT',
+    };
+    const placeholder = '[Start a new chat]';
+    let systemPrompt = '';
 
-    const isMultimodal = model === 'gemini-pro-vision';
+    // Collect all the system messages up until the first instance of a non-system message, and then remove them from the messages array.
+    let i;
+    for (i = 0; i < messages.length; i++) {
+        if (messages[i].role !== 'system') {
+            break;
+        }
+        // Append example names if not already done by the frontend (e.g. for group chats).
+        if (userName && messages[i].name === 'example_user') {
+            if (!messages[i].content.startsWith(`${userName}: `)) {
+                messages[i].content = `${userName}: ${messages[i].content}`;
+            }
+        }
+        if (charName && messages[i].name === 'example_assistant') {
+            if (!messages[i].content.startsWith(`${charName}: `)) {
+                messages[i].content = `${charName}: ${messages[i].content}`;
+            }
+        }
+        systemPrompt += `${messages[i].content}\n\n`;
+    }
 
-    if (isMultimodal) {
-        const combinedText = messages.map((message) => {
-            const role = message.role === 'assistant' ? 'MODEL: ' : 'USER: ';
-            return role + message.content;
-        }).join('\n\n').trim();
+    messages.splice(0, i);
 
-        const imageEntry = messages.find((message) => message.content?.[1]?.image_url);
-        const imageData = imageEntry?.content?.[1]?.image_url?.data ?? PNG_PIXEL;
-        contents.push({
-            parts: [
-                { text: combinedText },
-                {
-                    inlineData: {
-                        mimeType: 'image/png',
-                        data: imageData,
-                    },
-                },
-            ],
+    if (messages.length === 0) {
+        messages.unshift({
             role: 'user',
-        });
-    } else {
-        messages.forEach((message, index) => {
-            const role = message.role === 'assistant' ? 'model' : 'user';
-            if (lastRole === role) {
-                currentText += '\n\n' + message.content;
-            } else {
-                if (currentText !== '') {
-                    contents.push({
-                        parts: [{ text: currentText.trim() }],
-                        role: lastRole,
-                    });
-                }
-                currentText = message.content;
-                lastRole = role;
-            }
-            if (index === messages.length - 1) {
-                contents.push({
-                    parts: [{ text: currentText.trim() }],
-                    role: lastRole,
-                });
-            }
+            content: placeholder,
         });
     }
 
-    return contents;
+    const lastNonSystemMessageIndex = messages.findLastIndex(msg => msg.role === 'user' || msg.role === 'assistant');
+    const userPrompt = messages.slice(lastNonSystemMessageIndex).map(msg => msg.content).join('\n\n') || placeholder;
+
+    const chatHistory = messages.slice(0, lastNonSystemMessageIndex).map(msg => {
+        return {
+            role: roleMap[msg.role] || 'USER',
+            message: msg.content,
+        };
+    });
+
+    return { systemPrompt: systemPrompt.trim(), chatHistory, userPrompt };
+}
+
+/**
+ * Convert a prompt from the ChatML objects to the format used by Google MakerSuite models.
+ * @param {object[]} messages Array of messages
+ * @param {string} model Model name
+ * @param {boolean} useSysPrompt Use system prompt
+ * @param {string} charName Character name
+ * @param {string} userName User name
+ * @returns {{contents: *[], system_instruction: {parts: {text: string}}}} Prompt for Google MakerSuite models
+ */
+function convertGooglePrompt(messages, model, useSysPrompt = false, charName = '', userName = '') {
+    // This is a 1x1 transparent PNG
+    const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+    const visionSupportedModels = [
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-pro-latest',
+        'gemini-1.0-pro-vision-latest',
+        'gemini-pro-vision',
+    ];
+
+    const dummyRequiredModels = [
+        'gemini-1.0-pro-vision-latest',
+        'gemini-pro-vision',
+    ];
+
+    const isMultimodal = visionSupportedModels.includes(model);
+    let hasImage = false;
+
+    let sys_prompt = '';
+    if (useSysPrompt) {
+        while (messages.length > 1 && messages[0].role === 'system') {
+            // Append example names if not already done by the frontend (e.g. for group chats).
+            if (userName && messages[0].name === 'example_user') {
+                if (!messages[0].content.startsWith(`${userName}: `)) {
+                    messages[0].content = `${userName}: ${messages[0].content}`;
+                }
+            }
+            if (charName && messages[0].name === 'example_assistant') {
+                if (!messages[0].content.startsWith(`${charName}: `)) {
+                    messages[0].content = `${charName}: ${messages[0].content}`;
+                }
+            }
+            sys_prompt += `${messages[0].content}\n\n`;
+            messages.shift();
+        }
+    }
+
+    const system_instruction = { parts: { text: sys_prompt.trim() } };
+
+    const contents = [];
+    messages.forEach((message, index) => {
+        // fix the roles
+        if (message.role === 'system') {
+            message.role = 'user';
+        } else if (message.role === 'assistant') {
+            message.role = 'model';
+        }
+
+        // similar story as claude
+        if (message.name) {
+            if (Array.isArray(message.content)) {
+                message.content[0].text = `${message.name}: ${message.content[0].text}`;
+            } else {
+                message.content = `${message.name}: ${message.content}`;
+            }
+            delete message.name;
+        }
+
+        //create the prompt parts
+        const parts = [];
+        if (typeof message.content === 'string') {
+            parts.push({ text: message.content });
+        } else if (Array.isArray(message.content)) {
+            message.content.forEach((part) => {
+                if (part.type === 'text') {
+                    parts.push({ text: part.text });
+                } else if (part.type === 'image_url' && isMultimodal) {
+                    parts.push({
+                        inlineData: {
+                            mimeType: 'image/png',
+                            data: part.image_url.url,
+                        },
+                    });
+                    hasImage = true;
+                }
+            });
+        }
+
+        // merge consecutive messages with the same role
+        if (index > 0 && message.role === contents[contents.length - 1].role) {
+            contents[contents.length - 1].parts[0].text += '\n\n' + parts[0].text;
+        } else {
+            contents.push({
+                role: message.role,
+                parts: parts,
+            });
+        }
+    });
+
+    // pro 1.5 doesn't require a dummy image to be attached, other vision models do
+    if (isMultimodal && dummyRequiredModels.includes(model) && !hasImage) {
+        contents[0].parts.push({
+            inlineData: {
+                mimeType: 'image/png',
+                data: PNG_PIXEL,
+            },
+        });
+    }
+
+    return { contents: contents, system_instruction: system_instruction };
+}
+
+/**
+ * Convert a prompt from the ChatML objects to the format used by MistralAI.
+ * @param {object[]} messages Array of messages
+ * @param {string} model Model name
+ * @param {string} charName Character name
+ * @param {string} userName User name
+ */
+function convertMistralMessages(messages, model, charName = '', userName = '') {
+    if (!Array.isArray(messages)) {
+        return [];
+    }
+
+    //large seems to be throwing a 500 error if we don't make the first message a user role, most likely a bug since the other models won't do this
+    if (model.includes('large')) {
+        messages[0].role = 'user';
+    }
+
+    //must send a user role as last message
+    const lastMsg = messages[messages.length - 1];
+    if (messages.length > 0 && lastMsg && (lastMsg.role === 'system' || lastMsg.role === 'assistant')) {
+        if (lastMsg.role === 'assistant' && lastMsg.name) {
+            lastMsg.content = lastMsg.name + ': ' + lastMsg.content;
+        } else if (lastMsg.role === 'system') {
+            lastMsg.content = '[INST] ' + lastMsg.content + ' [/INST]';
+        }
+        lastMsg.role = 'user';
+    }
+
+    //system prompts can be stacked at the start, but any futher sys prompts after the first user/assistant message will break the model
+    let encounteredNonSystemMessage = false;
+    messages.forEach(msg => {
+        if (msg.role === 'system' && msg.name === 'example_assistant') {
+            if (charName) {
+                msg.content = `${charName}: ${msg.content}`;
+            }
+            delete msg.name;
+        }
+
+        if (msg.role === 'system' && msg.name === 'example_user') {
+            if (userName) {
+                msg.content = `${userName}: ${msg.content}`;
+            }
+            delete msg.name;
+        }
+
+        if (msg.name) {
+            msg.content = `${msg.name}: ${msg.content}`;
+            delete msg.name;
+        }
+
+        if ((msg.role === 'user' || msg.role === 'assistant') && !encounteredNonSystemMessage) {
+            encounteredNonSystemMessage = true;
+        }
+
+        if (encounteredNonSystemMessage && msg.role === 'system') {
+            msg.role = 'user';
+            //unsure if the instruct version is what they've deployed on their endpoints and if this will make a difference or not.
+            //it should be better than just sending the message as a user role without context though
+            msg.content = '[INST] ' + msg.content + ' [/INST]';
+        }
+    });
+
+    return messages;
 }
 
 /**
@@ -270,9 +451,82 @@ function convertTextCompletionPrompt(messages) {
     return messageStrings.join('\n') + '\nassistant:';
 }
 
+/**
+ * Convert OpenAI Chat Completion tools to the format used by Cohere.
+ * @param {object[]} tools OpenAI Chat Completion tool definitions
+ */
+function convertCohereTools(tools) {
+    if (!Array.isArray(tools) || tools.length === 0) {
+        return [];
+    }
+
+    const jsonSchemaToPythonTypes = {
+        'string': 'str',
+        'number': 'float',
+        'integer': 'int',
+        'boolean': 'bool',
+        'array': 'list',
+        'object': 'dict',
+    };
+
+    const cohereTools = [];
+
+    for (const tool of tools) {
+        if (tool?.type !== 'function') {
+            console.log(`Unsupported tool type: ${tool.type}`);
+            continue;
+        }
+
+        const name = tool?.function?.name;
+        const description = tool?.function?.description;
+        const properties = tool?.function?.parameters?.properties;
+        const required = tool?.function?.parameters?.required;
+        const parameters = {};
+
+        if (!name) {
+            console.log('Tool name is missing');
+            continue;
+        }
+
+        if (!description) {
+            console.log('Tool description is missing');
+        }
+
+        if (!properties || typeof properties !== 'object') {
+            console.log(`No properties found for tool: ${tool?.function?.name}`);
+            continue;
+        }
+
+        for (const property in properties) {
+            const parameterDefinition = properties[property];
+            const description = parameterDefinition.description || (parameterDefinition.enum ? JSON.stringify(parameterDefinition.enum) : '');
+            const type = jsonSchemaToPythonTypes[parameterDefinition.type] || 'str';
+            const isRequired = Array.isArray(required) && required.includes(property);
+            parameters[property] = {
+                description: description,
+                type: type,
+                required: isRequired,
+            };
+        }
+
+        const cohereTool = {
+            name: tool.function.name,
+            description: tool.function.description,
+            parameter_definitions: parameters,
+        };
+
+        cohereTools.push(cohereTool);
+    }
+
+    return cohereTools;
+}
+
 module.exports = {
     convertClaudePrompt,
     convertClaudeMessages,
     convertGooglePrompt,
     convertTextCompletionPrompt,
+    convertCohereMessages,
+    convertMistralMessages,
+    convertCohereTools,
 };

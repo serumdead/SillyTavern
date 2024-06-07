@@ -1,10 +1,13 @@
 import { registerDebugFunction } from './power-user.js';
+import { updateSecretDisplay } from './secrets.js';
 
 const storageKey = 'language';
 const overrideLanguage = localStorage.getItem(storageKey);
 const localeFile = String(overrideLanguage || navigator.language || navigator.userLanguage || 'en').toLowerCase();
 const langs = await fetch('/locales/lang.json').then(response => response.json());
-const localeData = await getLocaleData(localeFile);
+// Don't change to let/const! It will break module loading.
+// eslint-disable-next-line prefer-const
+var localeData = await getLocaleData(localeFile);
 
 /**
  * Fetches the locale data for the given language.
@@ -12,10 +15,8 @@ const localeData = await getLocaleData(localeFile);
  * @returns {Promise<Record<string, string>>} Locale data
  */
 async function getLocaleData(language) {
-    let supportedLang = langs.find(x => x.lang === language);
-
+    let supportedLang = findLang(language);
     if (!supportedLang) {
-        console.warn(`Unsupported language: ${language}`);
         return {};
     }
 
@@ -30,11 +31,24 @@ async function getLocaleData(language) {
     return data;
 }
 
+function findLang(language) {
+    var supportedLang = langs.find(x => x.lang === language);
+
+    if (!supportedLang) {
+        console.warn(`Unsupported language: ${language}`);
+    }
+    return supportedLang;
+}
+
 async function getMissingTranslations() {
     const missingData = [];
 
-    for (const language of langs) {
-        const localeData = await getLocaleData(language);
+    // Determine locales to search for untranslated strings
+    const isNotSupported = !findLang(localeFile);
+    const langsToProcess = (isNotSupported || localeFile == 'en') ? langs : [findLang(localeFile)];
+
+    for (const language of langsToProcess) {
+        const localeData = await getLocaleData(language.lang);
         $(document).find('[data-i18n]').each(function () {
             const keys = $(this).data('i18n').split(';'); // Multi-key entries are ; delimited
             for (const key of keys) {
@@ -42,12 +56,12 @@ async function getMissingTranslations() {
                 if (attributeMatch) { // attribute-tagged key
                     const localizedValue = localeData?.[attributeMatch[2]];
                     if (!localizedValue) {
-                        missingData.push({ key, language, value: $(this).attr(attributeMatch[1]) });
+                        missingData.push({ key, language: language.lang, value: $(this).attr(attributeMatch[1]) });
                     }
                 } else { // No attribute tag, treat as 'text'
                     const localizedValue = localeData?.[key];
                     if (!localizedValue) {
-                        missingData.push({ key, language, value: $(this).text().trim() });
+                        missingData.push({ key, language: language.lang, value: $(this).text().trim() });
                     }
                 }
             }
@@ -95,12 +109,12 @@ export function applyLocale(root = document) {
             const attributeMatch = key.match(/\[(\S+)\](.+)/); // [attribute]key
             if (attributeMatch) { // attribute-tagged key
                 const localizedValue = localeData?.[attributeMatch[2]];
-                if (localizedValue) {
+                if (localizedValue || localizedValue == '') {
                     $(this).attr(attributeMatch[1], localizedValue);
                 }
             } else { // No attribute tag, treat as 'text'
                 const localizedValue = localeData?.[key];
-                if (localizedValue) {
+                if (localizedValue || localizedValue == '') {
                     $(this).text(localizedValue);
                 }
             }
@@ -114,24 +128,26 @@ export function applyLocale(root = document) {
 
 
 function addLanguagesToDropdown() {
+    const uiLanguageSelects = $('#ui_language_select, #onboarding_ui_language_select');
     for (const langObj of langs) { // Set the value to the language code
         const option = document.createElement('option');
         option.value = langObj['lang']; // Set the value to the language code
         option.innerText = langObj['display']; // Set the display text to the language name
-        $('#ui_language_select').append(option);
+        uiLanguageSelects.append(option);
     }
 
     const selectedLanguage = localStorage.getItem(storageKey);
     if (selectedLanguage) {
-        $('#ui_language_select').val(selectedLanguage);
+        uiLanguageSelects.val(selectedLanguage);
     }
 }
 
 export function initLocales() {
     applyLocale();
     addLanguagesToDropdown();
+    updateSecretDisplay();
 
-    $('#ui_language_select').on('change', async function () {
+    $('#ui_language_select, #onboarding_ui_language_select').on('change', async function () {
         const language = String($(this).val());
 
         if (language) {
@@ -143,6 +159,6 @@ export function initLocales() {
         location.reload();
     });
 
-    registerDebugFunction('getMissingTranslations', 'Get missing translations', 'Detects missing localization data and dumps the data into the browser console.', getMissingTranslations);
+    registerDebugFunction('getMissingTranslations', 'Get missing translations', 'Detects missing localization data in the current locale and dumps the data into the browser console. If the current locale is English, searches all other locales.', getMissingTranslations);
     registerDebugFunction('applyLocale', 'Apply locale', 'Reapplies the currently selected locale to the page.', applyLocale);
 }
